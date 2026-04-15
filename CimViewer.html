@@ -1,0 +1,1335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CIM Network Viewer</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; }
+  #app { display: grid; grid-template-columns: 320px 6px 1fr; height: 100vh; }
+  #sidebar { padding: 12px; overflow: auto; background: #f4f5f7; font-size: 13px; min-width: 180px; }
+  #resizer { background: #d0d4da; cursor: col-resize; user-select: none; }
+  #resizer:hover, #resizer.dragging { background: #90caf9; }
+  #sidebar h2 { margin: 8px 0 6px; font-size: 14px; }
+  #sidebar h3 { margin: 14px 0 4px; font-size: 12px; text-transform: uppercase; color: #555; }
+  #viewport { position: relative; height: 100%; overflow: hidden; }
+  #map, #graph { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #graph { display: none; background: #fafbfc; }
+  #graph .edge { stroke: #000; stroke-dasharray: 3 3; stroke-width: 1; opacity: 0.55; pointer-events: none; }
+  #graph .edge.bad { stroke: #b00020; opacity: 0.9; stroke-width: 2; stroke-dasharray: 4 2; }
+  #graph g.node { cursor: pointer; }
+  #graph g.node.dragging { cursor: grabbing; }
+  #graph g.node text { font: 10px system-ui, sans-serif; pointer-events: none; user-select: none; fill: #222; }
+  #graph g.node rect, #graph g.node circle { stroke: #333; stroke-width: 1; }
+  #graph g.node.selected rect, #graph g.node.selected circle {
+    stroke: #ffd600; stroke-width: 3;
+    filter: drop-shadow(0 0 6px #ffeb3b);
+  }
+  #graph g.node.bad rect, #graph g.node.bad circle {
+    stroke: #6a0010; stroke-width: 2.5;
+    fill: #ff1744 !important;
+    filter: drop-shadow(0 0 8px #ff1744);
+    animation: badPulse 1.2s ease-in-out infinite;
+  }
+  #graph g.node.bad text { fill: #b00020; font-weight: 700; }
+  @keyframes badPulse {
+    0%, 100% { filter: drop-shadow(0 0 4px #ff1744); }
+    50%      { filter: drop-shadow(0 0 12px #ff1744); }
+  }
+  #graph .edge.bad { animation: badEdgePulse 1.2s ease-in-out infinite; }
+  @keyframes badEdgePulse {
+    0%, 100% { opacity: 0.7; }
+    50%      { opacity: 1; }
+  }
+  #graph g.node.hidden { display: none; }
+  #graph g.node text.hidden { display: none; }
+  #mode-box { background:#fff; border:1px solid #bbb; border-radius:4px; padding:6px 8px; margin-top:6px; }
+  #mode-box label { display: block; cursor: pointer; }
+  #search-box { position: relative; }
+  #search-input { width: 100%; box-sizing: border-box; padding: 5px 6px; font-size: 12px; }
+  #search-results {
+    position: absolute; top: 100%; left: 0; right: 0; z-index: 10;
+    background: #fff; border: 1px solid #bbb; border-top: none;
+    max-height: 220px; overflow-y: auto; font-size: 12px; display: none;
+  }
+  #search-results div {
+    padding: 4px 6px; cursor: pointer; border-bottom: 1px solid #eee;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #search-results div:hover, #search-results div.active { background: #bbdefb; }
+  #search-results .kind { color: #555; font-size: 10px; margin-right: 4px;
+                          display: inline-block; min-width: 60px; }
+  label.row { display: flex; align-items: center; gap: 6px; margin: 3px 0; cursor: pointer; }
+  .badge { display: inline-block; min-width: 22px; padding: 0 6px; text-align: center;
+           background: #e2e6ec; border-radius: 10px; font-size: 11px; margin-left: 4px; }
+  .warn { color: #b00020; font-weight: 600; }
+  .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  .leaflet-tooltip.cim-label { background: rgba(255,255,255,0.85); border: 1px solid #888; font-size: 10px; padding: 1px 4px; }
+  .leaflet-tooltip.cim-label.terminal { background: rgba(255,240,200,0.9); }
+  .leaflet-tooltip.cim-label.cn { background: rgba(220,240,255,0.9); }
+  .leaflet-tooltip.cim-label.bad { background: #ffbaba; border-color: #b00020; color: #b00020; font-weight: 700; }
+  #status { color: #444; font-size: 12px; margin-top: 6px; }
+  #filelabel { display: block; padding: 6px; background: #fff; border: 1px dashed #888; text-align: center; cursor: pointer; }
+  button { margin-top: 4px; }
+  #selection { margin-top: 10px; padding: 8px; background: #fff; border: 1px solid #bbb; border-radius: 4px; }
+  #selection h3 { margin-top: 0; }
+  #sel-title { font-weight: 600; font-size: 13px; word-break: break-all; }
+  #sel-sub { color: #555; font-size: 11px; margin-bottom: 6px; word-break: break-all; }
+  table.attrs { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
+  table.attrs th, table.attrs td { border: 1px solid #ddd; padding: 3px 4px; vertical-align: top;
+                                   word-break: break-all; }
+  table.attrs th { background: #eef1f5; text-align: left; width: 40%; font-weight: 600; }
+  table.attrs td { cursor: pointer; background: #fafbfc; }
+  table.attrs td:hover { background: #fff3bf; }
+  table.attrs td.copied { background: #c8e6c9 !important; }
+  .sel-highlight { filter: drop-shadow(0 0 6px #ffeb3b); pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <h2>CIM Network Viewer</h2>
+    <label id="filelabel">
+      Load CIM XML file…
+      <input id="fileinput" type="file" accept=".xml" style="display:none">
+    </label>
+    <button id="loadDefault" type="button">Try auto-load Test_Subnetwork_T001HA030018-fixed.xml</button>
+    <div id="status">No file loaded.</div>
+
+    <h3>Search</h3>
+    <div id="search-box">
+      <input id="search-input" type="text" placeholder="Search name or id…" autocomplete="off">
+      <div id="search-results"></div>
+    </div>
+
+    <h3>View mode</h3>
+    <div id="mode-box">
+      <label><input type="radio" name="viewmode" value="geo" checked> Geographic (map)</label>
+      <label><input type="radio" name="viewmode" value="rel"> Relationship (schematic)</label>
+      <div id="layout-box" style="margin-top:6px; display:none;">
+        <button id="relayout" type="button">Re-layout</button>
+      </div>
+    </div>
+
+    <h3>Layers</h3>
+    <label class="row"><input type="checkbox" id="lyr-terminals"> <span class="legend-dot" style="background:#ff9800"></span>Terminals <span class="badge" id="c-term">0</span></label>
+    <label class="row"><input type="checkbox" id="lyr-cn"> <span class="legend-dot" style="background:#00838f"></span>Connectivity Nodes <span class="badge" id="c-cn">0</span></label>
+    <div style="margin-top:6px; font-size:11px; color:#555;">Equipment by type:</div>
+    <div style="margin:2px 0 4px;">
+      <button id="lyr-all-on" type="button" style="font-size:11px; padding:1px 6px;">All on</button>
+      <button id="lyr-all-off" type="button" style="font-size:11px; padding:1px 6px;">All off</button>
+    </div>
+    <div id="type-list"></div>
+
+    <h3>Labels</h3>
+    <label class="row"><input type="checkbox" id="lbl-equip" checked> Equipment names</label>
+    <label class="row"><input type="checkbox" id="lbl-term"> Terminal names</label>
+    <label class="row"><input type="checkbox" id="lbl-cn"> Connectivity Node names</label>
+
+    <h3>Validation</h3>
+    <label class="row"><input type="checkbox" id="val-acl3"> <span class="warn">Highlight AcLineSegments with ≠2 terminals</span> <span class="badge" id="c-acl3">0</span></label>
+    <label class="row"><input type="checkbox" id="val-orphan-term"> Terminals missing a ConnectivityNode <span class="badge" id="c-orphan">0</span></label>
+    <label class="row"><input type="checkbox" id="val-no-loc"> Equipment missing a Location <span class="badge" id="c-noloc">0</span></label>
+
+    <h3>Issues</h3>
+    <div id="issues" style="font-size:12px;"></div>
+
+    <div id="selection">
+      <h3>Selected component</h3>
+      <div id="sel-title">(none — click a feature on the map)</div>
+      <div id="sel-sub"></div>
+      <table class="attrs" id="sel-attrs"><tbody></tbody></table>
+      <div id="sel-related" style="margin-top:8px; font-size:11px;"></div>
+      <button id="sel-clear" type="button" style="margin-top:6px;">Clear selection</button>
+    </div>
+  </div>
+  <div id="resizer" title="Drag to resize"></div>
+  <div id="viewport">
+    <div id="map"></div>
+    <svg id="graph" xmlns="http://www.w3.org/2000/svg">
+      <g id="graph-zoom">
+        <g id="graph-edges"></g>
+        <g id="graph-nodes"></g>
+      </g>
+    </svg>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script>
+"use strict";
+
+const map = L.map('map').setView([-43.63, 172.65], 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 20, attribution: '&copy; OpenStreetMap'
+}).addTo(map);
+
+const layers = {
+  lines: L.layerGroup().addTo(map),
+  equipment: L.layerGroup().addTo(map),
+  terminals: L.layerGroup(),
+  cn: L.layerGroup(),
+  badTerminals: L.layerGroup(),   // 3rd+ terminals on bad ACLS
+  validationOverlay: L.layerGroup().addTo(map),
+};
+
+let model = null; // populated after parse
+
+// ---------- Parsing ----------
+const CIM = 'http://iec.ch/TC57/CIM100#';
+const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
+
+function refId(el, tag) {
+  const c = el.getElementsByTagNameNS(CIM, tag)[0];
+  if (!c) return null;
+  const r = c.getAttributeNS(RDF, 'resource');
+  return r ? r.replace(/^#/, '') : null;
+}
+function textOf(el, tag) {
+  const c = el.getElementsByTagNameNS(CIM, tag)[0];
+  return c ? c.textContent.trim() : null;
+}
+function attrId(el) {
+  return el.getAttributeNS(RDF, 'ID') || el.getAttributeNS(RDF, 'about');
+}
+
+function parseCim(xmlText) {
+  const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
+  const root = doc.documentElement;
+
+  const equipment = new Map();     // id -> {id,name,type,locationId}
+  const terminals = new Map();     // id -> {id,name,seq,eqId,cnId}
+  const cns = new Map();           // id -> {id,name}
+  const locations = new Map();     // id -> {id, points: [{seq,x,y}]}
+
+  // "Equipment" = anything with a PowerSystemResource.Location (discovered dynamically).
+  const SKIP_TAGS = new Set([
+    'Terminal','ConnectivityNode','Location','PositionPoint','CoordinateSystem'
+  ]);
+
+  for (const el of Array.from(root.children)) {
+    if (el.namespaceURI !== CIM) continue;
+    const tag = el.localName;
+    const id = attrId(el);
+    if (!id) continue;
+
+    const hasLoc = el.getElementsByTagNameNS(CIM, 'PowerSystemResource.Location').length > 0;
+
+    if (!SKIP_TAGS.has(tag) && hasLoc) {
+      equipment.set(id, {
+        id,
+        name: textOf(el, 'IdentifiedObject.name') || id,
+        type: tag,
+        locationId: refId(el, 'PowerSystemResource.Location'),
+        baseVoltage: refId(el, 'ConductingEquipment.BaseVoltage'),
+        xml: el,
+      });
+    } else if (tag === 'Terminal') {
+      terminals.set(id, {
+        id,
+        name: textOf(el, 'IdentifiedObject.name') || id,
+        seq: parseInt(textOf(el, 'Terminal.sequenceNumber') || '0', 10),
+        eqId: refId(el, 'Terminal.ConductingEquipment'),
+        cnId: refId(el, 'Terminal.ConnectivityNode'),
+        xml: el,
+      });
+    } else if (tag === 'ConnectivityNode') {
+      cns.set(id, { id, name: textOf(el, 'IdentifiedObject.name') || id, xml: el });
+    } else if (tag === 'Location') {
+      locations.set(id, { id, points: [], xml: el });
+    } else if (tag === 'PositionPoint') {
+      const locId = refId(el, 'PositionPoint.Location');
+      if (!locId) continue;
+      if (!locations.has(locId)) locations.set(locId, { id: locId, points: [] });
+      locations.get(locId).points.push({
+        seq: parseInt(textOf(el, 'PositionPoint.sequenceNumber') || '0', 10),
+        x: parseFloat(textOf(el, 'PositionPoint.xPosition')),
+        y: parseFloat(textOf(el, 'PositionPoint.yPosition')),
+      });
+    }
+  }
+  // sort position points
+  for (const loc of locations.values()) loc.points.sort((a,b) => a.seq - b.seq);
+
+  // index: equipment -> terminals
+  const termsByEq = new Map();
+  for (const t of terminals.values()) {
+    if (!t.eqId) continue;
+    if (!termsByEq.has(t.eqId)) termsByEq.set(t.eqId, []);
+    termsByEq.get(t.eqId).push(t);
+  }
+  for (const arr of termsByEq.values()) arr.sort((a,b) => a.seq - b.seq);
+
+  // index: CN -> terminals
+  const termsByCN = new Map();
+  for (const t of terminals.values()) {
+    if (!t.cnId) continue;
+    if (!termsByCN.has(t.cnId)) termsByCN.set(t.cnId, []);
+    termsByCN.get(t.cnId).push(t);
+  }
+
+  return { equipment, terminals, cns, locations, termsByEq, termsByCN };
+}
+
+// ---------- Rendering ----------
+const STYLE = {
+  AcLineSegment:  { color: '#1565c0', weight: 3 },
+  EnergyConsumer: { color: '#2e7d32', radius: 5 },
+  Junction:       { color: '#6a1b9a', radius: 4 },
+  PowerTransformer:{ color: '#ef6c00', radius: 6 },
+  Breaker:        { color: '#c62828', radius: 5 },
+  Disconnector:   { color: '#c62828', radius: 5 },
+  Fuse:           { color: '#d84315', radius: 5 },
+  Switch:         { color: '#c62828', radius: 5 },
+  EnergySource:   { color: '#000',    radius: 6 },
+  default:        { color: '#555',    radius: 4 },
+};
+
+function styleFor(type) { return STYLE[type] || STYLE.default; }
+
+// Centroid of a location (first point or average for line)
+function locCenter(loc) {
+  if (!loc || !loc.points.length) return null;
+  if (loc.points.length === 1) return [loc.points[0].y, loc.points[0].x];
+  const mid = loc.points[Math.floor(loc.points.length / 2)];
+  return [mid.y, mid.x];
+}
+
+function render(m) {
+  selectedLayer = null; selectedOrigStyle = null; selectedDescriptor = null;
+  graphState = null;
+  if (simulation) { simulation.stop(); simulation = null; }
+  Object.values(layers).forEach(l => l.clearLayers());
+
+  const bounds = [];
+
+  // --- Equipment: polyline if loc has ≥2 points, else point marker ---
+  let badAcls = [];
+  for (const eq of m.equipment.values()) {
+    const loc = m.locations.get(eq.locationId);
+    if (!loc || !loc.points.length) continue;
+    const terms = m.termsByEq.get(eq.id) || [];
+    // Only flag AcLineSegment on terminal count — other types have different expectations.
+    const isBadAcls = eq.type === 'AcLineSegment' && terms.length !== 2;
+
+    if (loc.points.length >= 2) {
+      const latlngs = loc.points.map(p => [p.y, p.x]);
+      latlngs.forEach(ll => bounds.push(ll));
+      if (isBadAcls) badAcls.push({ eq, terms, latlngs });
+      const color = isBadAcls ? '#b00020' : (STYLE[eq.type] || STYLE.default).color;
+      const poly = L.polyline(latlngs, {
+        color, weight: isBadAcls ? 6 : 5, opacity: 0.9,
+      });
+      poly.bindTooltip(`${eq.name}<br>${eq.type}<br>terminals: ${terms.length}${isBadAcls?' ⚠':''}`,
+                       { sticky: true });
+      poly._cimEq = eq;
+      poly.on('click', (e) => { L.DomEvent.stopPropagation(e); selectLayer(poly, {kind:'equipment', obj: eq}); });
+      poly.addTo(layers.lines);
+    } else {
+      const c = [loc.points[0].y, loc.points[0].x];
+      bounds.push(c);
+      const s = styleFor(eq.type);
+      const marker = L.circleMarker(c, {
+        radius: s.radius, color: s.color, fillColor: s.color, fillOpacity: 0.85, weight: 1,
+      });
+      marker.bindTooltip(`${eq.name}<br>${eq.type}<br>terminals: ${terms.length}`, { sticky: true });
+      marker._cimEq = eq;
+      marker.on('click', (e) => { L.DomEvent.stopPropagation(e); selectLayer(marker, {kind:'equipment', obj: eq}); });
+      marker.addTo(layers.equipment);
+
+      const lbl = L.tooltip({ permanent: true, direction: 'right', className: 'cim-label', offset: [6, 0] })
+        .setContent(`${eq.type}: ${eq.name}`)
+        .setLatLng(c);
+      marker._label = lbl;
+    }
+  }
+
+  // --- Terminals (placed at CN position if CN resolvable, else on equipment) ---
+  // For AcLineSegment, terminal 1 = first point, terminal 2 = last point, terminal 3+ = middle.
+  for (const eq of m.equipment.values()) {
+    const terms = m.termsByEq.get(eq.id) || [];
+    if (!terms.length) continue;
+    const loc = m.locations.get(eq.locationId);
+    for (const t of terms) {
+      let latlng;
+      if (eq.type === 'AcLineSegment' && loc && loc.points.length >= 2) {
+        if (t.seq === 1) latlng = [loc.points[0].y, loc.points[0].x];
+        else if (t.seq === 2) {
+          const p = loc.points[loc.points.length-1]; latlng = [p.y, p.x];
+        } else {
+          const p = loc.points[Math.floor(loc.points.length/2)]; latlng = [p.y, p.x];
+        }
+      } else {
+        latlng = locCenter(loc);
+      }
+      if (!latlng) continue;
+      const isBadTerm = (eq.type === 'AcLineSegment' && (terms.length !== 2) && t.seq > 2);
+      const m1 = L.circleMarker(latlng, {
+        radius: isBadTerm ? 9 : 4,
+        color: isBadTerm ? '#b00020' : '#ff9800',
+        fillColor: isBadTerm ? '#ff1744' : '#ffc107',
+        fillOpacity: 0.9, weight: isBadTerm ? 3 : 1,
+      });
+      const cn = t.cnId ? m.cns.get(t.cnId) : null;
+      const connEqs = cn ? (m.termsByCN.get(cn.id)||[])
+            .filter(tt => tt.eqId !== eq.id)
+            .map(tt => {
+              const e2 = m.equipment.get(tt.eqId);
+              return e2 ? `${e2.type}:${e2.name}` : tt.eqId;
+            }) : [];
+      m1.bindTooltip(
+        `Terminal <b>${t.name}</b><br>seq=${t.seq}<br>on ${eq.type}: ${eq.name}<br>CN: ${cn?cn.name:'(none)'}`
+        + (connEqs.length ? `<br>also connects: ${connEqs.join(', ')}` : ''),
+        { sticky: true }
+      );
+      m1._cimTerm = t;
+      m1._cimEq = eq;
+      m1._isBadTerm = isBadTerm;
+      m1._label = L.tooltip({ permanent: true, direction: 'top',
+                              className: 'cim-label terminal' + (isBadTerm ? ' bad' : ''),
+                              offset: [0, -6] })
+                     .setContent(`T${t.seq}: ${t.name}`)
+                     .setLatLng(latlng);
+      m1.on('click', (e) => { L.DomEvent.stopPropagation(e); selectLayer(m1, {kind:'terminal', obj: t}); });
+      m1.addTo(layers.terminals);
+      if (isBadTerm) m1.addTo(layers.badTerminals);
+    }
+  }
+
+  // --- Connectivity Nodes (placed at average of their terminals' positions) ---
+  for (const cn of m.cns.values()) {
+    const terms = m.termsByCN.get(cn.id) || [];
+    const pts = [];
+    for (const t of terms) {
+      const eq = m.equipment.get(t.eqId);
+      if (!eq) continue;
+      const loc = m.locations.get(eq.locationId);
+      let latlng;
+      if (eq.type === 'AcLineSegment' && loc && loc.points.length >= 2) {
+        if (t.seq === 1) latlng = [loc.points[0].y, loc.points[0].x];
+        else if (t.seq === 2) {
+          const p = loc.points[loc.points.length-1]; latlng = [p.y, p.x];
+        } else {
+          const p = loc.points[Math.floor(loc.points.length/2)]; latlng = [p.y, p.x];
+        }
+      } else {
+        latlng = locCenter(loc);
+      }
+      if (latlng) pts.push(latlng);
+    }
+    if (!pts.length) continue;
+    const avg = [ pts.reduce((a,p)=>a+p[0],0)/pts.length, pts.reduce((a,p)=>a+p[1],0)/pts.length ];
+    const mk = L.circleMarker(avg, {
+      radius: 5, color: '#00838f', fillColor: '#4dd0e1', fillOpacity: 0.9, weight: 1,
+    });
+    mk.bindTooltip(`CN: <b>${cn.name}</b><br>id: ${cn.id}<br>terminals: ${terms.length}`, { sticky: true });
+    mk._cimCn = cn;
+    mk.on('click', (e) => { L.DomEvent.stopPropagation(e); selectLayer(mk, {kind:'cn', obj: cn}); });
+    mk._label = L.tooltip({ permanent: true, direction: 'bottom', className: 'cim-label cn', offset: [0, 6] })
+                   .setContent(`CN: ${cn.name}`).setLatLng(avg);
+    mk.addTo(layers.cn);
+  }
+
+  if (bounds.length) map.fitBounds(bounds, { padding: [30,30] });
+
+  // Type list (dynamic)
+  const typeCounts = new Map();
+  for (const eq of m.equipment.values()) {
+    typeCounts.set(eq.type, (typeCounts.get(eq.type) || 0) + 1);
+  }
+  const types = [...typeCounts.keys()].sort();
+  const typeList = document.getElementById('type-list');
+  // preserve existing user toggles on re-render
+  const prev = {};
+  typeList.querySelectorAll('input[data-cim-type]').forEach(cb => {
+    prev[cb.dataset.cimType] = cb.checked;
+  });
+  typeList.innerHTML = '';
+  for (const type of types) {
+    const color = (STYLE[type] || STYLE.default).color;
+    const id = 'type-' + type;
+    const label = document.createElement('label');
+    label.className = 'row';
+    label.innerHTML = `<input type="checkbox" data-cim-type="${type}" id="${id}"
+                         ${prev[type] !== false ? 'checked' : ''}>
+                       <span class="legend-dot" style="background:${color}"></span>
+                       ${type} <span class="badge">${typeCounts.get(type)}</span>`;
+    typeList.appendChild(label);
+    label.querySelector('input').addEventListener('change', applyLayerToggles);
+  }
+
+  // counts
+  document.getElementById('c-term').textContent = m.terminals.size;
+  document.getElementById('c-cn').textContent = m.cns.size;
+  document.getElementById('c-acl3').textContent = badAcls.length;
+  document.getElementById('c-orphan').textContent =
+    [...m.terminals.values()].filter(t => !t.cnId).length;
+  document.getElementById('c-noloc').textContent =
+    [...m.equipment.values()].filter(e => !e.locationId || !m.locations.has(e.locationId) || !m.locations.get(e.locationId).points.length).length;
+
+  // issues panel
+  const issues = document.getElementById('issues');
+  issues.innerHTML = '';
+  if (badAcls.length) {
+    const h = document.createElement('div');
+    h.innerHTML = `<b class="warn">AcLineSegments with ≠2 terminals (${badAcls.length}):</b>`;
+    issues.appendChild(h);
+    for (const b of badAcls) {
+      const div = document.createElement('div');
+      div.style.margin = '2px 0 6px';
+      div.innerHTML = `• <code>${b.eq.name}</code> — ${b.terms.length} terminals: `
+        + b.terms.map(t=>`T${t.seq}`).join(', ');
+      const btn = document.createElement('button');
+      btn.textContent = 'zoom';
+      btn.style.marginLeft = '6px';
+      btn.onclick = () => {
+        if (currentView === 'geo') {
+          map.fitBounds(b.latlngs, { padding:[50,50] });
+        } else if (graphState) {
+          const key = kindKey('equipment', b.eq.id);
+          const n = graphState.nodeById.get(key);
+          if (!n) return;
+          const svg = document.getElementById('graph');
+          const r = svg.getBoundingClientRect();
+          const k = Math.max(graphZoomTransform.k, 1.2);
+          const tx = r.width/2 - n.x * k;
+          const ty = r.height/2 - n.y * k;
+          const t = d3.zoomIdentity.translate(tx, ty).scale(k);
+          if (graphZoomBehavior) {
+            d3.select(svg).transition().duration(500)
+              .call(graphZoomBehavior.transform, t);
+          }
+          // also select it
+          const el = graphState.nodeElByKey.get(key);
+          if (el) selectLayer(el, { kind: 'equipment', obj: b.eq });
+        }
+      };
+      div.appendChild(btn);
+      issues.appendChild(div);
+    }
+  } else {
+    issues.textContent = 'No ACLS terminal-count issues.';
+  }
+
+  applyLayerToggles();
+}
+
+// ---------- Layer toggling ----------
+function setGroup(group, show) {
+  if (show && !map.hasLayer(group)) group.addTo(map);
+  if (!show && map.hasLayer(group)) map.removeLayer(group);
+}
+function setLabels(group, on) {
+  group.eachLayer(l => {
+    if (!l._label) return;
+    if (on) l._label.addTo(map); else map.removeLayer(l._label);
+  });
+}
+
+function typeEnabled(type) {
+  const cb = document.querySelector(`input[data-cim-type="${type}"]`);
+  return cb ? cb.checked : true;
+}
+
+function applyLayerToggles() {
+  // per-feature visibility driven by type checkboxes
+  const lblEquip = document.getElementById('lbl-equip').checked;
+  function setForPool(pool) {
+    pool.eachLayer(l => {
+      const eq = l._cimEq;
+      if (!eq) return;
+      const show = typeEnabled(eq.type);
+      if (show) { if (!map.hasLayer(l)) l.addTo(map); }
+      else      { if (map.hasLayer(l)) map.removeLayer(l); }
+      if (l._label) {
+        if (show && lblEquip) l._label.addTo(map);
+        else                  map.removeLayer(l._label);
+      }
+    });
+  }
+  setForPool(layers.lines);
+  setForPool(layers.equipment);
+
+  setGroup(layers.terminals, document.getElementById('lyr-terminals').checked);
+  setGroup(layers.cn,        document.getElementById('lyr-cn').checked);
+
+  setLabels(layers.terminals, document.getElementById('lbl-term').checked
+                              && document.getElementById('lyr-terminals').checked);
+  setLabels(layers.cn,        document.getElementById('lbl-cn').checked
+                              && document.getElementById('lyr-cn').checked);
+
+  // Validation: bad terminals always visible when val-acl3 ticked, even if Terminals layer is off
+  const showBad = document.getElementById('val-acl3').checked;
+  if (showBad) {
+    layers.terminals.eachLayer(l => { if (l._isBadTerm) l.addTo(map); });
+    // also force their labels on
+    layers.terminals.eachLayer(l => { if (l._isBadTerm && l._label) l._label.addTo(map); });
+  } else if (!document.getElementById('lyr-terminals').checked) {
+    layers.terminals.eachLayer(l => {
+      if (l._isBadTerm) { map.removeLayer(l); if (l._label) map.removeLayer(l._label); }
+    });
+  }
+
+  if (typeof applyLayerTogglesGraph === 'function') applyLayerTogglesGraph();
+}
+
+// ---------- Selection ----------
+// selected can be either a Leaflet layer (map view) or an SVG <g> element (graph view).
+let selectedLayer = null;
+let selectedOrigStyle = null;
+let selectedDescriptor = null;   // remember kind+obj so we can re-apply selection after view swap
+
+function restorePrevSelection() {
+  if (!selectedLayer) return;
+  try {
+    if (selectedLayer instanceof SVGElement) {
+      selectedLayer.classList.remove('selected');
+    } else {
+      if (selectedOrigStyle) selectedLayer.setStyle(selectedOrigStyle);
+      const el = selectedLayer.getElement && selectedLayer.getElement();
+      if (el) el.classList.remove('sel-highlight');
+    }
+  } catch (e) {}
+  selectedLayer = null;
+  selectedOrigStyle = null;
+}
+
+function highlightLayer(layer) {
+  if (layer instanceof SVGElement) {
+    layer.classList.add('selected');
+    return;
+  }
+  const opts = layer.options || {};
+  selectedOrigStyle = {
+    color: opts.color, weight: opts.weight, fillColor: opts.fillColor,
+    fillOpacity: opts.fillOpacity, radius: opts.radius, opacity: opts.opacity,
+  };
+  if (typeof layer.setStyle === 'function') {
+    layer.setStyle({
+      color: '#ffd600',
+      fillColor: '#ffd600',
+      fillOpacity: 1,
+    });
+  }
+  const el = layer.getElement && layer.getElement();
+  if (el) el.classList.add('sel-highlight');
+}
+
+function selectLayer(layer, descriptor) {
+  restorePrevSelection();
+  selectedLayer = layer;
+  selectedDescriptor = descriptor;
+  highlightLayer(layer);
+  renderSelectionPanel(descriptor);
+}
+
+// descriptor: { kind: 'equipment'|'terminal'|'cn', obj }
+function renderSelectionPanel(descriptor) {
+  const title = document.getElementById('sel-title');
+  const sub   = document.getElementById('sel-sub');
+  const tbody = document.querySelector('#sel-attrs tbody');
+  const rel   = document.getElementById('sel-related');
+  tbody.innerHTML = ''; rel.innerHTML = '';
+
+  const { kind, obj } = descriptor;
+  const typeLabel = kind === 'equipment' ? obj.type
+                  : kind === 'terminal'  ? 'Terminal'
+                  : 'ConnectivityNode';
+  title.textContent = `${typeLabel}: ${obj.name || obj.id}`;
+  sub.textContent = `id: ${obj.id}`;
+
+  // Dump all child cim:* elements as attribute rows
+  const rows = [];
+  if (obj.xml) {
+    for (const c of Array.from(obj.xml.children)) {
+      if (c.namespaceURI !== CIM) continue;
+      const tag = c.localName;
+      const resource = c.getAttributeNS(RDF, 'resource');
+      const value = resource ? resource.replace(/^#/, '') : (c.textContent || '').trim();
+      rows.push([tag, value, resource ? 'ref' : 'text']);
+    }
+  }
+  // Derived / computed extras
+  if (kind === 'equipment') {
+    const terms = (model.termsByEq.get(obj.id) || []).map(t => `T${t.seq}:${t.name}`);
+    rows.push(['(derived) terminal count', String(terms.length), 'derived']);
+    if (terms.length) rows.push(['(derived) terminals', terms.join(', '), 'derived']);
+    const loc = model.locations.get(obj.locationId);
+    if (loc && loc.points.length) {
+      rows.push(['(derived) position points', String(loc.points.length), 'derived']);
+      rows.push(['(derived) first lon,lat',
+                 `${loc.points[0].x}, ${loc.points[0].y}`, 'derived']);
+    }
+  } else if (kind === 'terminal') {
+    const eq = model.equipment.get(obj.eqId);
+    if (eq) rows.push(['(derived) on equipment', `${eq.type}:${eq.name}`, 'derived']);
+    if (obj.cnId) {
+      const cn = model.cns.get(obj.cnId);
+      const peers = (model.termsByCN.get(obj.cnId) || [])
+        .filter(t => t.id !== obj.id)
+        .map(t => {
+          const e2 = model.equipment.get(t.eqId);
+          return e2 ? `${e2.type}:${e2.name} (T${t.seq})` : t.id;
+        });
+      if (cn) rows.push(['(derived) CN name', cn.name, 'derived']);
+      if (peers.length) rows.push(['(derived) CN peers', peers.join('; '), 'derived']);
+    }
+  } else if (kind === 'cn') {
+    const terms = model.termsByCN.get(obj.id) || [];
+    const peers = terms.map(t => {
+      const e2 = model.equipment.get(t.eqId);
+      return e2 ? `${e2.type}:${e2.name} (T${t.seq})` : t.id;
+    });
+    rows.push(['(derived) terminal count', String(terms.length), 'derived']);
+    if (peers.length) rows.push(['(derived) connects', peers.join('; '), 'derived']);
+  }
+
+  for (const [k, v, kind2] of rows) {
+    const tr = document.createElement('tr');
+    const th = document.createElement('th'); th.textContent = k;
+    const td = document.createElement('td'); td.textContent = v;
+    td.title = 'Click to copy';
+    td.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(v);
+        td.classList.add('copied');
+        setTimeout(() => td.classList.remove('copied'), 700);
+      } catch (e) {
+        // fallback
+        const r = document.createRange(); r.selectNodeContents(td);
+        const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+      }
+    });
+    tr.appendChild(th); tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+}
+
+document.getElementById('sel-clear').addEventListener('click', () => {
+  restorePrevSelection();
+  selectedDescriptor = null;
+  document.getElementById('sel-title').textContent = '(none — click a feature on the map)';
+  document.getElementById('sel-sub').textContent = '';
+  document.querySelector('#sel-attrs tbody').innerHTML = '';
+  document.getElementById('sel-related').innerHTML = '';
+});
+
+// ---------- Events ----------
+['lyr-terminals','lyr-cn',
+ 'lbl-equip','lbl-term','lbl-cn',
+ 'val-acl3','val-orphan-term','val-no-loc'].forEach(id => {
+  document.getElementById(id).addEventListener('change', applyLayerToggles);
+});
+document.getElementById('lyr-all-on').addEventListener('click', () => {
+  document.querySelectorAll('input[data-cim-type]').forEach(cb => cb.checked = true);
+  applyLayerToggles();
+});
+document.getElementById('lyr-all-off').addEventListener('click', () => {
+  document.querySelectorAll('input[data-cim-type]').forEach(cb => cb.checked = false);
+  applyLayerToggles();
+});
+
+document.getElementById('fileinput').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const text = await f.text();
+  loadText(text, f.name);
+});
+
+document.getElementById('loadDefault').addEventListener('click', async () => {
+  try {
+    const r = await fetch('Test_Subnetwork_T001HA030018-fixed.xml');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    loadText(await r.text(), 'Test_Subnetwork_T001HA030018-fixed.xml');
+  } catch (err) {
+    document.getElementById('status').innerHTML =
+      'Auto-load failed (browsers block file:// fetch). Use the file picker above.<br><small>' + err + '</small>';
+  }
+});
+
+function loadText(text, name) {
+  try {
+    model = parseCim(text);
+    document.getElementById('status').textContent =
+      `Loaded ${name}: ${model.equipment.size} equipment, ${model.terminals.size} terminals, ${model.cns.size} CNs.`;
+    render(model);
+    if (currentView === 'rel') renderGraph(model);
+  } catch (e) {
+    document.getElementById('status').textContent = 'Parse error: ' + e.message;
+    console.error(e);
+  }
+}
+
+// ---------- Relationship (schematic) view ----------
+const SVG_NS = 'http://www.w3.org/2000/svg';
+let simulation = null;
+let graphState = null;  // { nodes, edges, nodeById, nodeElByKey, edgeEls }
+let graphZoomTransform = d3.zoomIdentity;
+let graphZoomBehavior = null;
+
+function kindKey(kind, id) { return `${kind}::${id}`; }
+
+function buildGraph(m) {
+  const nodes = [];
+  const nodeById = new Map();
+
+  for (const eq of m.equipment.values()) {
+    const n = { key: kindKey('equipment', eq.id), kind: 'equipment', obj: eq,
+                type: eq.type, label: eq.name };
+    nodes.push(n); nodeById.set(n.key, n);
+  }
+  for (const t of m.terminals.values()) {
+    const n = { key: kindKey('terminal', t.id), kind: 'terminal', obj: t,
+                label: `T${t.seq}: ${t.name}` };
+    nodes.push(n); nodeById.set(n.key, n);
+  }
+  for (const cn of m.cns.values()) {
+    const n = { key: kindKey('cn', cn.id), kind: 'cn', obj: cn,
+                label: `CN: ${cn.name}` };
+    nodes.push(n); nodeById.set(n.key, n);
+  }
+
+  const edges = [];
+  for (const t of m.terminals.values()) {
+    const tKey = kindKey('terminal', t.id);
+    if (t.eqId && nodeById.has(kindKey('equipment', t.eqId))) {
+      edges.push({ source: tKey, target: kindKey('equipment', t.eqId), kind: 'te' });
+    }
+    if (t.cnId && nodeById.has(kindKey('cn', t.cnId))) {
+      edges.push({ source: tKey, target: kindKey('cn', t.cnId), kind: 'tc' });
+    }
+  }
+
+  // Flag bad ACLS and their stray terminals
+  for (const eq of m.equipment.values()) {
+    if (eq.type !== 'AcLineSegment') continue;
+    const terms = m.termsByEq.get(eq.id) || [];
+    if (terms.length !== 2) {
+      nodeById.get(kindKey('equipment', eq.id)).bad = true;
+      for (const t of terms) {
+        if (t.seq > 2) nodeById.get(kindKey('terminal', t.id)).bad = true;
+      }
+    }
+  }
+
+  return { nodes, edges, nodeById };
+}
+
+function nodeShape(n) {
+  if (n.kind === 'equipment') {
+    const s = styleFor(n.type);
+    return { shape: 'rect', fill: s.color, w: 80, h: 22, rx: 5 };
+  }
+  if (n.kind === 'terminal') return { shape: 'circle', fill: '#ffc107', r: 7 };
+  return { shape: 'circle', fill: '#4dd0e1', r: 9 };
+}
+
+function renderGraph(m) {
+  const svg = document.getElementById('graph');
+  const edgesG = document.getElementById('graph-edges');
+  const nodesG = document.getElementById('graph-nodes');
+  edgesG.innerHTML = ''; nodesG.innerHTML = '';
+
+  const state = buildGraph(m);
+  const { nodes, edges, nodeById } = state;
+
+  // Resolve edge source/target references from keys → node objects (d3-force mutates them)
+  for (const e of edges) {
+    e.source = nodeById.get(e.source);
+    e.target = nodeById.get(e.target);
+  }
+
+  const rect = svg.getBoundingClientRect();
+  const W = Math.max(rect.width, 800), H = Math.max(rect.height, 600);
+
+  {
+    // Radial tree layout: build spanning tree(s) via BFS over connected components; pick the
+    // highest-degree node in each component as its root.
+    const adj = new Map();
+    for (const n of nodes) adj.set(n.key, []);
+    for (const e of edges) {
+      // edges were just resolved source/target to node objects; use .key here
+      const sk = typeof e.source === 'string' ? e.source : e.source.key;
+      const tk = typeof e.target === 'string' ? e.target : e.target.key;
+      adj.get(sk).push(tk);
+      adj.get(tk).push(sk);
+    }
+    const visited = new Set();
+    const components = [];
+    for (const n of nodes) {
+      if (visited.has(n.key)) continue;
+      // BFS to find this component
+      const compKeys = [];
+      const q = [n.key]; visited.add(n.key);
+      while (q.length) {
+        const k = q.shift(); compKeys.push(k);
+        for (const nb of adj.get(k)) if (!visited.has(nb)) { visited.add(nb); q.push(nb); }
+      }
+      // pick root = max degree (prefer ConnectivityNode or Equipment over Terminal, as ties)
+      let bestRoot = compKeys[0], bestScore = -1;
+      for (const k of compKeys) {
+        const nd = nodeById.get(k);
+        const deg = adj.get(k).length;
+        const bonus = nd.kind === 'cn' ? 2 : nd.kind === 'equipment' ? 1 : 0;
+        const score = deg * 10 + bonus;
+        if (score > bestScore) { bestScore = score; bestRoot = k; }
+      }
+      // BFS tree from root
+      const seen = new Set([bestRoot]);
+      const treeRoot = { key: bestRoot, children: [] };
+      const byKey = new Map([[bestRoot, treeRoot]]);
+      const q2 = [bestRoot];
+      while (q2.length) {
+        const k = q2.shift();
+        for (const nb of adj.get(k)) {
+          if (seen.has(nb)) continue;
+          seen.add(nb);
+          const child = { key: nb, children: [] };
+          byKey.get(k).children.push(child);
+          byKey.set(nb, child);
+          q2.push(nb);
+        }
+      }
+      components.push({ tree: treeRoot, size: compKeys.length });
+    }
+
+    // Lay out each component radially and stack them in a grid.
+    components.sort((a, b) => b.size - a.size);
+    let gx = 0, gy = 0, rowHeight = 0;
+    const maxRowWidth = Math.max(W, 1200);
+    for (const comp of components) {
+      const h = d3.hierarchy(comp.tree);
+      const depth = h.height || 1;
+      const radius = 80 + depth * 110;
+      d3.tree()
+        .size([2 * Math.PI, radius])
+        .separation((a, b) => (a.parent === b.parent ? 1 : 1.6) / Math.max(a.depth, 1))
+        (h);
+
+      // Component bounding box in local coords (cartesian)
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      h.each(d => {
+        const cx = d.y * Math.cos(d.x - Math.PI / 2);
+        const cy = d.y * Math.sin(d.x - Math.PI / 2);
+        d._cx = cx; d._cy = cy;
+        if (cx < minX) minX = cx; if (cy < minY) minY = cy;
+        if (cx > maxX) maxX = cx; if (cy > maxY) maxY = cy;
+      });
+      const w = (maxX - minX) + 60, ht = (maxY - minY) + 60;
+
+      if (gx + w > maxRowWidth && gx > 0) { gx = 0; gy += rowHeight + 40; rowHeight = 0; }
+      const offX = gx - minX + 30;
+      const offY = gy - minY + 30;
+      h.each(d => {
+        const n = nodeById.get(d.data.key);
+        n.x = d._cx + offX;
+        n.y = d._cy + offY;
+        n.fx = n.x; n.fy = n.y;        // pin so nothing drifts
+      });
+      gx += w + 40;
+      rowHeight = Math.max(rowHeight, ht);
+    }
+  }
+
+  // --- Create edge elements ---
+  const edgeEls = edges.map(e => {
+    const line = document.createElementNS(SVG_NS, 'line');
+    line.setAttribute('class', 'edge');
+    // An edge is "bad" if it sits on a bad terminal that is a stray on an ACLS
+    if ((e.source.bad && e.source.kind === 'terminal') ||
+        (e.target.bad && e.target.kind === 'terminal')) {
+      line.classList.add('bad');
+    }
+    edgesG.appendChild(line);
+    return line;
+  });
+
+  // --- Create node elements ---
+  const nodeElByKey = new Map();
+  for (const n of nodes) {
+    const g = document.createElementNS(SVG_NS, 'g');
+    g.setAttribute('class', 'node kind-' + n.kind + (n.bad ? ' bad' : ''));
+    g.dataset.key = n.key;
+
+    const sh = nodeShape(n);
+    let shapeEl;
+    if (sh.shape === 'rect') {
+      shapeEl = document.createElementNS(SVG_NS, 'rect');
+      shapeEl.setAttribute('x', -sh.w/2); shapeEl.setAttribute('y', -sh.h/2);
+      shapeEl.setAttribute('width', sh.w); shapeEl.setAttribute('height', sh.h);
+      shapeEl.setAttribute('rx', sh.rx); shapeEl.setAttribute('fill', sh.fill);
+    } else {
+      shapeEl = document.createElementNS(SVG_NS, 'circle');
+      shapeEl.setAttribute('r', sh.r); shapeEl.setAttribute('fill', sh.fill);
+    }
+    g.appendChild(shapeEl);
+
+    const text = document.createElementNS(SVG_NS, 'text');
+    text.setAttribute('text-anchor', 'middle');
+    const yOffset = sh.shape === 'rect' ? 4 : -(sh.r + 4);
+    text.setAttribute('y', yOffset);
+    text.textContent = n.kind === 'equipment'
+      ? `${n.type}: ${n.label}`
+      : n.label;
+    text.dataset.labelKind = n.kind;
+    g.appendChild(text);
+
+    g.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      selectLayer(g, { kind: n.kind, obj: n.obj });
+    });
+
+    nodesG.appendChild(g);
+    nodeElByKey.set(n.key, g);
+    n.el = g;
+  }
+
+  function tick() {
+    for (let i=0; i<edges.length; i++) {
+      const e = edges[i], el = edgeEls[i];
+      el.setAttribute('x1', e.source.x); el.setAttribute('y1', e.source.y);
+      el.setAttribute('x2', e.target.x); el.setAttribute('y2', e.target.y);
+    }
+    for (const n of nodes) {
+      n.el.setAttribute('transform', `translate(${n.x},${n.y})`);
+    }
+  }
+
+  if (simulation) { simulation.stop(); simulation = null; }
+  tick();
+
+  // --- Drag to pin ---
+  d3.select(nodesG).selectAll('g.node').call(
+    d3.drag()
+      .on('start', function(ev, d) {
+        const key = this.dataset.key;
+        const n = nodeById.get(key);
+        if (simulation && !ev.active) simulation.alphaTarget(0.3).restart();
+        n.fx = n.x; n.fy = n.y;
+        this.classList.add('dragging');
+      })
+      .on('drag', function(ev) {
+        const key = this.dataset.key;
+        const n = nodeById.get(key);
+        n.fx = ev.x; n.fy = ev.y;
+        n.x = ev.x; n.y = ev.y;
+        if (!simulation) tick();   // radial mode has no ticking sim
+      })
+      .on('end', function(ev) {
+        this.classList.remove('dragging');
+        if (simulation && !ev.active) simulation.alphaTarget(0);
+      })
+  );
+
+  // --- Zoom/pan ---
+  const zoomG = document.getElementById('graph-zoom');
+  graphZoomBehavior = d3.zoom()
+    .scaleExtent([0.1, 5])
+    .on('zoom', (ev) => {
+      graphZoomTransform = ev.transform;
+      zoomG.setAttribute('transform', ev.transform.toString());
+    });
+  d3.select(svg).call(graphZoomBehavior).on('dblclick.zoom', null);
+  d3.select(svg).call(graphZoomBehavior.transform, graphZoomTransform);
+
+  // Click on background clears selection
+  svg.onclick = (ev) => {
+    if (ev.target === svg || ev.target.id === 'graph-zoom' ||
+        ev.target.id === 'graph-edges' || ev.target.id === 'graph-nodes') {
+      if (selectedLayer instanceof SVGElement) {
+        restorePrevSelection();
+      }
+    }
+  };
+
+  graphState = { nodes, edges, nodeById, nodeElByKey, edgeEls };
+  applyLayerTogglesGraph();
+
+  // Re-apply selection in schematic if same obj is selected
+  if (selectedDescriptor) {
+    const key = kindKey(selectedDescriptor.kind, selectedDescriptor.obj.id);
+    const el = nodeElByKey.get(key);
+    if (el) {
+      // mark selected without calling selectLayer (avoid restoring a non-existent prev)
+      el.classList.add('selected');
+      selectedLayer = el;
+    }
+  }
+}
+
+function applyLayerTogglesGraph() {
+  if (!graphState) return;
+  const showTerm  = document.getElementById('lyr-terminals').checked;
+  const showCN    = document.getElementById('lyr-cn').checked;
+  const lblEquip  = document.getElementById('lbl-equip').checked;
+  const lblTerm   = document.getElementById('lbl-term').checked;
+  const lblCN     = document.getElementById('lbl-cn').checked;
+  const showBad   = document.getElementById('val-acl3').checked;
+
+  for (const n of graphState.nodes) {
+    let visible = true;
+    if (n.kind === 'equipment') {
+      visible = typeEnabled(n.type);
+    } else if (n.kind === 'terminal') {
+      visible = showTerm || (showBad && n.bad);
+    } else if (n.kind === 'cn') {
+      visible = showCN;
+    }
+    n.el.classList.toggle('hidden', !visible);
+
+    // label visibility
+    const text = n.el.querySelector('text');
+    let lblOn = false;
+    if (n.kind === 'equipment') lblOn = lblEquip;
+    else if (n.kind === 'terminal') lblOn = lblTerm || (showBad && n.bad);
+    else if (n.kind === 'cn') lblOn = lblCN;
+    if (text) text.classList.toggle('hidden', !lblOn);
+
+    // bad highlighting toggle
+    if (n.bad) {
+      n.el.classList.toggle('bad', showBad);
+    }
+  }
+
+  // Hide edges whose endpoints are hidden
+  for (let i = 0; i < graphState.edges.length; i++) {
+    const e = graphState.edges[i];
+    const hide = e.source.el.classList.contains('hidden')
+              || e.target.el.classList.contains('hidden');
+    graphState.edgeEls[i].style.display = hide ? 'none' : '';
+  }
+}
+
+// ---------- View-mode switching ----------
+let currentView = 'geo';
+
+function setView(mode) {
+  currentView = mode;
+  const mapDiv = document.getElementById('map');
+  const graphSvg = document.getElementById('graph');
+  const relayoutBtn = document.getElementById('relayout');
+  const layoutBox = document.getElementById('layout-box');
+  if (mode === 'geo') {
+    mapDiv.style.display = 'block';
+    graphSvg.style.display = 'none';
+    layoutBox.style.display = 'none';
+    setTimeout(() => map.invalidateSize(), 0);
+    restoreLayerState();
+  } else {
+    mapDiv.style.display = 'none';
+    graphSvg.style.display = 'block';
+    layoutBox.style.display = 'block';
+    saveAndForceAllLayers();
+    // Defer a tick so the SVG has its real size before we measure for layout.
+    if (model && !graphState) setTimeout(() => renderGraph(model), 0);
+    else if (model) applyLayerTogglesGraph();
+  }
+
+  // Re-project an existing selection across the view
+  if (selectedDescriptor) {
+    restorePrevSelection();
+    if (mode === 'rel' && graphState) {
+      const key = kindKey(selectedDescriptor.kind, selectedDescriptor.obj.id);
+      const el = graphState.nodeElByKey.get(key);
+      if (el) { selectedLayer = el; el.classList.add('selected'); }
+    } else if (mode === 'geo') {
+      // find the Leaflet layer whose _cimEq/_cimTerm matches
+      const d = selectedDescriptor;
+      const pools = [layers.lines, layers.equipment, layers.terminals, layers.cn];
+      for (const pool of pools) {
+        pool.eachLayer(l => {
+          if (selectedLayer) return;
+          if (d.kind === 'equipment' && l._cimEq && l._cimEq.id === d.obj.id && !l._cimTerm) {
+            selectedLayer = l; highlightLayer(l);
+          } else if (d.kind === 'terminal' && l._cimTerm && l._cimTerm.id === d.obj.id) {
+            selectedLayer = l; highlightLayer(l);
+          } else if (d.kind === 'cn' && l._cimCn && l._cimCn.id === d.obj.id) {
+            selectedLayer = l; highlightLayer(l);
+          }
+        });
+      }
+    }
+    renderSelectionPanel(selectedDescriptor);
+  }
+}
+
+document.querySelectorAll('input[name="viewmode"]').forEach(r => {
+  r.addEventListener('change', (e) => setView(e.target.value));
+});
+document.getElementById('relayout').addEventListener('click', () => {
+  if (model) { graphState = null; renderGraph(model); }
+});
+// ---------- Layer state save/restore for view swaps ----------
+const FIXED_LAYER_IDS = ['lyr-terminals','lyr-cn','lbl-equip','lbl-term','lbl-cn'];
+let savedLayerState = null;
+function eachLayerToggle(fn) {
+  for (const id of FIXED_LAYER_IDS) fn(document.getElementById(id), id);
+  document.querySelectorAll('input[data-cim-type]').forEach(cb => fn(cb, 'type:' + cb.dataset.cimType));
+}
+function saveAndForceAllLayers() {
+  if (savedLayerState) return;
+  savedLayerState = {};
+  eachLayerToggle((cb, key) => { savedLayerState[key] = cb.checked; cb.checked = true; });
+  applyLayerToggles();
+}
+function restoreLayerState() {
+  if (!savedLayerState) return;
+  eachLayerToggle((cb, key) => {
+    if (key in savedLayerState) cb.checked = savedLayerState[key];
+  });
+  savedLayerState = null;
+  applyLayerToggles();
+}
+
+// ---------- Search ----------
+function searchCandidates(query) {
+  if (!model || !query) return [];
+  const q = query.toLowerCase();
+  const hits = [];
+  const push = (kind, obj, displayName, matchStr) => {
+    const idx = matchStr.toLowerCase().indexOf(q);
+    if (idx < 0) return;
+    hits.push({ kind, obj, displayName, score: idx + (matchStr.length - q.length) * 0.001 });
+  };
+  for (const eq of model.equipment.values()) {
+    push('equipment', eq, `${eq.type}: ${eq.name}`, `${eq.type} ${eq.name} ${eq.id}`);
+  }
+  for (const t of model.terminals.values()) {
+    push('terminal', t, `Terminal ${t.name} (seq ${t.seq})`, `${t.name} ${t.id}`);
+  }
+  for (const cn of model.cns.values()) {
+    push('cn', cn, `CN: ${cn.name}`, `${cn.name} ${cn.id}`);
+  }
+  hits.sort((a, b) => a.score - b.score);
+  return hits.slice(0, 30);
+}
+
+function zoomAndSelect(kind, obj) {
+  if (currentView === 'geo') {
+    // Find the Leaflet layer and the lat/lng to pan to
+    let layer = null, latlng = null;
+    if (kind === 'equipment') {
+      if (obj.type === 'AcLineSegment') {
+        layers.lines.eachLayer(l => { if (!layer && l._cimEq && l._cimEq.id === obj.id) layer = l; });
+        if (layer) latlng = layer.getBounds().getCenter();
+      } else {
+        layers.equipment.eachLayer(l => { if (!layer && l._cimEq && l._cimEq.id === obj.id) layer = l; });
+        if (layer) latlng = layer.getLatLng();
+      }
+    } else if (kind === 'terminal') {
+      layers.terminals.eachLayer(l => { if (!layer && l._cimTerm && l._cimTerm.id === obj.id) layer = l; });
+      if (layer) latlng = layer.getLatLng();
+    } else if (kind === 'cn') {
+      layers.cn.eachLayer(l => { if (!layer && l._cimCn && l._cimCn.id === obj.id) layer = l; });
+      if (layer) latlng = layer.getLatLng();
+    }
+    if (latlng) {
+      if (kind === 'equipment' && obj.type === 'AcLineSegment' && layer && layer.getBounds) {
+        map.fitBounds(layer.getBounds().pad(0.5), { maxZoom: 19 });
+      } else {
+        map.setView(latlng, Math.max(map.getZoom(), 19));
+      }
+    }
+    if (layer) selectLayer(layer, { kind, obj });
+    else {
+      // no layer match (e.g. hidden layer group) — still populate the panel
+      restorePrevSelection();
+      selectedDescriptor = { kind, obj };
+      renderSelectionPanel({ kind, obj });
+    }
+  } else {
+    // Relationship mode
+    if (!graphState) return;
+    const key = kindKey(kind, obj.id);
+    const n = graphState.nodeById.get(key);
+    if (!n) return;
+    const svg = document.getElementById('graph');
+    const r = svg.getBoundingClientRect();
+    const k = Math.max(graphZoomTransform.k, 1.5);
+    const tx = r.width / 2 - n.x * k;
+    const ty = r.height / 2 - n.y * k;
+    const t = d3.zoomIdentity.translate(tx, ty).scale(k);
+    if (graphZoomBehavior) {
+      d3.select(svg).transition().duration(500).call(graphZoomBehavior.transform, t);
+    }
+    const el = graphState.nodeElByKey.get(key);
+    if (el) selectLayer(el, { kind, obj });
+  }
+}
+
+(function wireSearch() {
+  const input = document.getElementById('search-input');
+  const box = document.getElementById('search-results');
+  let current = [];
+  let activeIdx = -1;
+
+  function render() {
+    box.innerHTML = '';
+    if (!current.length) { box.style.display = 'none'; return; }
+    current.forEach((h, i) => {
+      const d = document.createElement('div');
+      d.className = i === activeIdx ? 'active' : '';
+      d.innerHTML = `<span class="kind">${h.kind}</span>${h.displayName}`;
+      d.addEventListener('mousedown', (e) => { e.preventDefault(); pick(i); });
+      box.appendChild(d);
+    });
+    box.style.display = 'block';
+  }
+  function pick(i) {
+    const h = current[i]; if (!h) return;
+    input.value = h.displayName;
+    box.style.display = 'none';
+    zoomAndSelect(h.kind, h.obj);
+  }
+  input.addEventListener('input', () => {
+    current = searchCandidates(input.value.trim());
+    activeIdx = current.length ? 0 : -1;
+    render();
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') {
+      activeIdx = Math.min(activeIdx + 1, current.length - 1); render(); e.preventDefault();
+    } else if (e.key === 'ArrowUp') {
+      activeIdx = Math.max(activeIdx - 1, 0); render(); e.preventDefault();
+    } else if (e.key === 'Enter') {
+      if (activeIdx >= 0) pick(activeIdx);
+      e.preventDefault();
+    } else if (e.key === 'Escape') {
+      box.style.display = 'none';
+    }
+  });
+  input.addEventListener('blur', () => { setTimeout(() => box.style.display = 'none', 150); });
+  input.addEventListener('focus', () => { if (current.length) box.style.display = 'block'; });
+})();
+
+// ---------- Sidebar resizer ----------
+(function() {
+  const app = document.getElementById('app');
+  const resizer = document.getElementById('resizer');
+  let dragging = false;
+  resizer.addEventListener('mousedown', (e) => {
+    dragging = true;
+    resizer.classList.add('dragging');
+    document.body.style.cursor = 'col-resize';
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const w = Math.min(Math.max(e.clientX, 180), window.innerWidth - 200);
+    app.style.gridTemplateColumns = `${w}px 6px 1fr`;
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove('dragging');
+    document.body.style.cursor = '';
+    map.invalidateSize();
+  });
+})();
+
+// Try auto-load on page open (works when served via http)
+document.getElementById('loadDefault').click();
+</script>
+</body>
+</html>

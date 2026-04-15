@@ -1,0 +1,21 @@
+# Sample / test data — not for public publication
+*.xml
+
+# Local work files
+Readme.txt
+Similix/
+*.docx
+*.msg
+*.jpg
+*.jpeg
+Screenshot*.png
+screenshot.png
+
+# Claude Code local state
+.claude/
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
