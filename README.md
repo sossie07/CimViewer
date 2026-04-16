@@ -2,7 +2,13 @@
 
 A single-file web tool for inspecting IEC **CIM / CIM100 RDF/XML** power-network exports in the browser. Loads any CIM XML file, draws components on a real map *and* on a non-crossing schematic, and flags common data-quality problems (like AcLineSegments with the wrong number of Terminals).
 
-No build step, no server, no install — just open the HTML file.
+## ▶ Try it online
+
+**[Launch CimViewer →](https://sossie07.github.io/CimViewer/CimViewer.html)**
+
+No install, no clone, no sign-up — click the link, pick your CIM XML file, and it parses entirely in your browser. Nothing is uploaded anywhere.
+
+Prefer to run it locally? See [Running it locally](#running-it-locally) below.
 
 ## Features
 
@@ -15,7 +21,9 @@ No build step, no server, no install — just open the HTML file.
 - **Search** by component name or mRID; pressing Enter zooms and selects in either view.
 - **Resizable sidebar**, drag-to-pin nodes in the schematic, and zoom/pan on both views.
 
-## Running it
+## Running it locally
+
+If you'd rather not use the hosted version, or you want to work offline:
 
 1. Download [`CimViewer.html`](CimViewer.html).
 2. Serve the folder with any local HTTP server. The simplest way is Python (included with most systems):
