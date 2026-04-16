@@ -1072,6 +1072,27 @@ function renderGraph(m) {
       zoomG.setAttribute('transform', ev.transform.toString());
     });
   d3.select(svg).call(graphZoomBehavior).on('dblclick.zoom', null);
+
+  // Fit-to-view on first render: compute node bbox and centre/scale to fit the viewport.
+  // Only auto-fit when the user hasn't already panned/zoomed.
+  const noUserTransform = graphZoomTransform === d3.zoomIdentity ||
+    (graphZoomTransform.k === 1 && graphZoomTransform.x === 0 && graphZoomTransform.y === 0);
+  if (noUserTransform && nodes.length) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of nodes) {
+      if (n.x < minX) minX = n.x;
+      if (n.y < minY) minY = n.y;
+      if (n.x > maxX) maxX = n.x;
+      if (n.y > maxY) maxY = n.y;
+    }
+    const pad = 60;
+    const bbW = (maxX - minX) + pad * 2;
+    const bbH = (maxY - minY) + pad * 2;
+    const scale = Math.min(W / bbW, H / bbH, 1);  // never zoom IN past 1:1 on small graphs
+    const tx = W / 2 - (minX + (maxX - minX) / 2) * scale;
+    const ty = H / 2 - (minY + (maxY - minY) / 2) * scale;
+    graphZoomTransform = d3.zoomIdentity.translate(tx, ty).scale(scale);
+  }
   d3.select(svg).call(graphZoomBehavior.transform, graphZoomTransform);
 
   // Click on background clears selection
@@ -1199,7 +1220,7 @@ document.querySelectorAll('input[name="viewmode"]').forEach(r => {
   r.addEventListener('change', (e) => setView(e.target.value));
 });
 document.getElementById('relayout').addEventListener('click', () => {
-  if (model) { graphState = null; renderGraph(model); }
+  if (model) { graphState = null; graphZoomTransform = d3.zoomIdentity; renderGraph(model); }
 });
 // ---------- Layer state save/restore for view swaps ----------
 const FIXED_LAYER_IDS = ['lyr-terminals','lyr-cn','lbl-equip','lbl-term','lbl-cn'];
