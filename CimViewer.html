@@ -83,9 +83,39 @@
   table.attrs td:hover { background: #fff3bf; }
   table.attrs td.copied { background: #c8e6c9 !important; }
   .sel-highlight { filter: drop-shadow(0 0 6px #ffeb3b); pointer-events: none; }
+  #splash-overlay {
+    position: fixed; inset: 0; z-index: 10000;
+    background: rgba(0,0,0,0.45);
+    display: flex; align-items: center; justify-content: center;
+  }
+  #splash-box {
+    background: #fff; border-radius: 10px; padding: 28px 32px; max-width: 420px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3); text-align: center; font-family: system-ui, sans-serif;
+  }
+  #splash-box h2 { margin: 0 0 12px; font-size: 18px; color: #1565c0; }
+  #splash-box p  { margin: 0 0 18px; font-size: 14px; color: #333; line-height: 1.5; }
+  #splash-box a.coffee-btn {
+    display: inline-block; padding: 10px 22px; background: #ffdd00; color: #000;
+    border-radius: 6px; text-decoration: none; font-weight: 700; font-size: 14px;
+    transition: background 0.2s;
+  }
+  #splash-box a.coffee-btn:hover { background: #ffc800; }
+  #splash-box button.dismiss {
+    display: block; margin: 14px auto 0; background: none; border: none;
+    color: #777; font-size: 12px; cursor: pointer; text-decoration: underline;
+  }
 </style>
 </head>
 <body>
+<div id="splash-overlay">
+  <div id="splash-box">
+    <h2>Thanks for using CimViewer!</h2>
+    <p>If you find this tool useful or are using it in a commercial environment, say thanks and buy me a coffee.</p>
+    <a class="coffee-btn" href="https://buymeacoffee.com/sossie07" target="_blank" rel="noopener">Buy me a coffee</a>
+    <button class="dismiss" id="splash-close">No thanks, continue to CimViewer</button>
+  </div>
+</div>
+
 <div id="app">
   <div id="sidebar">
     <h2>CIM Network Viewer</h2>
@@ -160,10 +190,21 @@
 <script>
 "use strict";
 
+document.getElementById('splash-close').addEventListener('click', () => {
+  document.getElementById('splash-overlay').remove();
+});
+
 const map = L.map('map').setView([-43.63, 172.65], 13);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+const tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 20, attribution: '&copy; OpenStreetMap'
 }).addTo(map);
+tileLayer.on('tileerror', function onTileErr() {
+  tileLayer.off('tileerror', onTileErr);
+  const d = document.createElement('div');
+  d.style.cssText = 'position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:1000;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:6px;padding:10px 18px;font:13px/1.4 sans-serif;max-width:480px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.15)';
+  d.innerHTML = 'Map tiles blocked (403). To fix this, serve the file from a local web server:<br><code style="background:#f8f0d8;padding:2px 5px;border-radius:3px">python -m http.server 8000</code><br>then open <b>http://localhost:8000/CimViewer.html</b>';
+  document.getElementById('map').appendChild(d);
+});
 
 const layers = {
   lines: L.layerGroup().addTo(map),

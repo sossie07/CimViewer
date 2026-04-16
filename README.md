@@ -18,20 +18,26 @@ No build step, no server, no install — just open the HTML file.
 ## Running it
 
 1. Download [`CimViewer.html`](CimViewer.html).
-2. Double-click to open it in any modern browser (Chrome, Edge, Firefox).
-3. Click **Load CIM XML file…** and pick your CIM RDF/XML export.
+2. Serve the folder with any local HTTP server. The simplest way is Python (included with most systems):
+   ```
+   python -m http.server 8000
+   ```
+3. Open <http://localhost:8000/CimViewer.html> in any modern browser (Chrome, Edge, Firefox).
+4. Click **Load CIM XML file…** and pick your CIM RDF/XML export.
 
 That's it. Nothing is uploaded anywhere — parsing happens entirely in your browser.
 
-### Running from a local server (optional)
+> **Why a local server?** OpenStreetMap's tile servers require a valid HTTP `Referer` header. If you open the HTML file directly by double-clicking it, the browser uses the `file://` protocol which sends no referer, so map tiles will show a 403 error. Serving from `localhost` fixes this. The Relationship (schematic) view works either way since it doesn't use map tiles.
 
-If you'd rather use the auto-load button or fetch files relative to the HTML, serve the folder:
+### Other ways to serve locally
 
-```
-python -m http.server 8000
-```
-
-Then open <http://localhost:8000/CimViewer.html>.
+| Tool | Command |
+|------|---------|
+| Python 3 | `python -m http.server 8000` |
+| Python 2 | `python -m SimpleHTTPServer 8000` |
+| Node.js | `npx serve .` |
+| PHP | `php -S localhost:8000` |
+| VS Code | Install the "Live Server" extension, right-click the file → *Open with Live Server* |
 
 ## Supported CIM shape
 
