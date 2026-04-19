@@ -123,7 +123,6 @@
       Load CIM XML file…
       <input id="fileinput" type="file" accept=".xml" style="display:none">
     </label>
-    <button id="loadDefault" type="button">Try auto-load Test_Subnetwork_T001HA030018-fixed.xml</button>
     <div id="status">No file loaded.</div>
 
     <h3>Search</h3>
@@ -778,17 +777,6 @@ document.getElementById('fileinput').addEventListener('change', async (e) => {
   loadText(text, f.name);
 });
 
-document.getElementById('loadDefault').addEventListener('click', async () => {
-  try {
-    const r = await fetch('Test_Subnetwork_T001HA030018-fixed.xml');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    loadText(await r.text(), 'Test_Subnetwork_T001HA030018-fixed.xml');
-  } catch (err) {
-    document.getElementById('status').innerHTML =
-      'Auto-load failed (browsers block file:// fetch). Use the file picker above.<br><small>' + err + '</small>';
-  }
-});
-
 function loadText(text, name) {
   try {
     model = parseCim(text);
@@ -1389,9 +1377,6 @@ function zoomAndSelect(kind, obj) {
     map.invalidateSize();
   });
 })();
-
-// Try auto-load on page open (works when served via http)
-document.getElementById('loadDefault').click();
 </script>
 </body>
 </html>
