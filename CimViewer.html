@@ -199,9 +199,12 @@ document.getElementById('splash-close').addEventListener('click', () => {
   document.getElementById('splash-overlay').remove();
 });
 
-const map = L.map('map').setView([-43.63, 172.65], 13);
+// maxZoom 24 lets you keep zooming past the basemap to inspect closely-spaced
+// components; the OSM background just disappears beyond the tile layer's maxZoom.
+const map = L.map('map', { maxZoom: 24 }).setView([-43.63, 172.65], 13);
 const tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 20, attribution: '&copy; OpenStreetMap'
+  // maxNativeZoom 19 = OSM's deepest real tiles; 20 upscales them, beyond that no background.
+  maxZoom: 20, maxNativeZoom: 19, attribution: '&copy; OpenStreetMap'
 }).addTo(map);
 tileLayer.on('tileerror', function onTileErr() {
   tileLayer.off('tileerror', onTileErr);
