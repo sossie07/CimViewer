@@ -159,9 +159,11 @@
     <label class="row"><input type="checkbox" id="val-acl3"> <span class="warn">Highlight AcLineSegments with ≠2 terminals</span> <span class="badge" id="c-acl3">0</span></label>
     <label class="row"><input type="checkbox" id="val-orphan-term"> Terminals missing a ConnectivityNode <span class="badge" id="c-orphan">0</span></label>
     <label class="row"><input type="checkbox" id="val-no-loc"> Equipment missing a Location <span class="badge" id="c-noloc">0</span></label>
+    <label class="row"><input type="checkbox" id="val-abstract"> <span class="warn">Disallowed / abstract CIM classes (e.g. Switch)</span> <span class="badge" id="c-abstract">0</span></label>
 
     <h3>Issues</h3>
     <div id="issues" style="font-size:12px;"></div>
+    <div id="abstract-issues" style="font-size:12px; margin-top:6px;"></div>
 
     <div id="selection">
       <h3>Selected component</h3>
@@ -169,7 +171,11 @@
       <div id="sel-sub"></div>
       <table class="attrs" id="sel-attrs"><tbody></tbody></table>
       <div id="sel-related" style="margin-top:8px; font-size:11px;"></div>
-      <button id="sel-clear" type="button" style="margin-top:6px;">Clear selection</button>
+      <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
+        <button id="sel-clear" type="button">Clear selection</button>
+        <button id="sel-toggle-world" type="button"
+                title="Switch between geographic and relationship view, centered and zoomed on the selected component">🌐 Toggle worlds</button>
+      </div>
     </div>
   </div>
   <div id="resizer" title="Drag to resize"></div>
@@ -238,21 +244,32 @@ function parseCim(xmlText) {
   const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
   const root = doc.documentElement;
 
+  // Detect the CIM namespace/version actually declared in the file (display only).
+  const cimNamespace = root.getAttribute('xmlns:cim') || CIM;
+  const cimVersion = (cimNamespace.match(/CIM[_]?([0-9]+)/i) || [, ''])[1];
+
   const equipment = new Map();     // id -> {id,name,type,locationId}
   const terminals = new Map();     // id -> {id,name,seq,eqId,cnId}
   const cns = new Map();           // id -> {id,name}
   const locations = new Map();     // id -> {id, points: [{seq,x,y}]}
+  const allTop = [];               // every top-level CIM object (for class validation)
 
   // "Equipment" = anything with a PowerSystemResource.Location (discovered dynamically).
   const SKIP_TAGS = new Set([
     'Terminal','ConnectivityNode','Location','PositionPoint','CoordinateSystem'
   ]);
+  // Pure geometry/structural tags that are never user-facing "components".
+  const GEOMETRY_TAGS = new Set(['Location','PositionPoint','CoordinateSystem']);
 
   for (const el of Array.from(root.children)) {
     if (el.namespaceURI !== CIM) continue;
     const tag = el.localName;
     const id = attrId(el);
     if (!id) continue;
+
+    if (!GEOMETRY_TAGS.has(tag)) {
+      allTop.push({ id, name: textOf(el, 'IdentifiedObject.name') || id, type: tag, xml: el });
+    }
 
     const hasLoc = el.getElementsByTagNameNS(CIM, 'PowerSystemResource.Location').length > 0;
 
@@ -309,7 +326,8 @@ function parseCim(xmlText) {
     termsByCN.get(t.cnId).push(t);
   }
 
-  return { equipment, terminals, cns, locations, termsByEq, termsByCN };
+  return { equipment, terminals, cns, locations, termsByEq, termsByCN,
+           allTop, cimNamespace, cimVersion };
 }
 
 // ---------- Rendering ----------
@@ -327,6 +345,34 @@ const STYLE = {
 };
 
 function styleFor(type) { return STYLE[type] || STYLE.default; }
+
+// ---------- CIM class validation ----------
+// Abstract / "umbrella" CIM classes that must NOT appear as concrete instances.
+// In IEC CIM an instance has to be a concrete leaf class (e.g. a Breaker); an
+// abstract base (e.g. a Switch) is invalid as an object. This hierarchy is stable
+// across CIM16 / CIM17 / CIM100. `use` lists the concrete subclasses to replace it
+// with. Ref: https://zepben.github.io/evolve/docs/cim/ewb/  (Wires / Core packages)
+// Extend this map if your profile defines further abstract types.
+const ABSTRACT_CIM_CLASSES = {
+  Switch:              { use: ['Breaker','Disconnector','Fuse','LoadBreakSwitch','Recloser','Sectionaliser','Jumper','GroundDisconnector'] },
+  ProtectedSwitch:     { use: ['Breaker','LoadBreakSwitch','Recloser'] },
+  Conductor:           { use: ['AcLineSegment','DCLineSegment'] },
+  Connector:           { use: ['Junction','BusbarSection'] },
+  EnergyConnection:    { use: ['EnergyConsumer','EnergySource'] },
+  RegulatingCondEq:    { use: ['SynchronousMachine','PowerElectronicsConnection','StaticVarCompensator','LinearShuntCompensator'] },
+  RotatingMachine:     { use: ['SynchronousMachine','AsynchronousMachine'] },
+  ShuntCompensator:    { use: ['LinearShuntCompensator','NonlinearShuntCompensator'] },
+  TransformerEnd:      { use: ['PowerTransformerEnd'] },
+  ConductingEquipment: { use: ['a concrete equipment class (Breaker, AcLineSegment, …)'] },
+  Equipment:           { use: ['a concrete equipment class'] },
+  PowerSystemResource: { use: ['a concrete equipment class'] },
+  IdentifiedObject:    { use: ['a concrete CIM class'] },
+};
+
+function getDisallowedClassInstances() {
+  if (!model || !model.allTop) return [];
+  return model.allTop.filter(o => ABSTRACT_CIM_CLASSES[o.type]);
+}
 
 // Centroid of a location (first point or average for line)
 function locCenter(loc) {
@@ -507,6 +553,7 @@ function render(m) {
     [...m.terminals.values()].filter(t => !t.cnId).length;
   document.getElementById('c-noloc').textContent =
     [...m.equipment.values()].filter(e => !e.locationId || !m.locations.has(e.locationId) || !m.locations.get(e.locationId).points.length).length;
+  document.getElementById('c-abstract').textContent = getDisallowedClassInstances().length;
 
   // issues panel
   const issues = document.getElementById('issues');
@@ -552,7 +599,51 @@ function render(m) {
     issues.textContent = 'No ACLS terminal-count issues.';
   }
 
+  renderAbstractIssues();
   applyLayerToggles();
+}
+
+// Render the "disallowed / abstract CIM class" issues list. Gated on the checkbox
+// so it's an opt-in check; the count badge is always kept current in render().
+function renderAbstractIssues() {
+  const box = document.getElementById('abstract-issues');
+  box.innerHTML = '';
+  if (!model || !document.getElementById('val-abstract').checked) return;
+
+  const bad = getDisallowedClassInstances();
+  const ver = model.cimVersion ? `CIM${model.cimVersion}` : 'unknown CIM version';
+  if (!bad.length) {
+    box.innerHTML = `<div style="color:#2e7d32;">No disallowed abstract CIM classes found `
+                  + `(file declares ${ver}).</div>`;
+    return;
+  }
+  const h = document.createElement('div');
+  h.innerHTML = `<b class="warn">Disallowed abstract CIM classes (${bad.length})</b> `
+              + `<span style="color:#777;">— file declares ${ver}</span>`;
+  box.appendChild(h);
+
+  for (const o of bad) {
+    const info = ABSTRACT_CIM_CLASSES[o.type];
+    const div = document.createElement('div');
+    div.style.margin = '2px 0 6px';
+    div.innerHTML = `• <code>${o.name}</code> is a <b class="warn">${o.type}</b> (abstract) — `
+                  + `use ${info.use.join(', ')}`;
+    const eq = model.equipment.get(o.id);
+    if (eq) {
+      const btn = document.createElement('button');
+      btn.textContent = 'zoom';
+      btn.style.marginLeft = '6px';
+      // zoomAndSelect already handles both geo (map) and rel (schematic) views.
+      btn.onclick = () => zoomAndSelect('equipment', eq);
+      div.appendChild(btn);
+    } else {
+      const span = document.createElement('span');
+      span.style.cssText = 'margin-left:6px; color:#777;';
+      span.textContent = '(no location — not shown on map)';
+      div.appendChild(span);
+    }
+    box.appendChild(div);
+  }
 }
 
 // ---------- Layer toggling ----------
@@ -761,6 +852,7 @@ document.getElementById('sel-clear').addEventListener('click', () => {
  'val-acl3','val-orphan-term','val-no-loc'].forEach(id => {
   document.getElementById(id).addEventListener('change', applyLayerToggles);
 });
+document.getElementById('val-abstract').addEventListener('change', renderAbstractIssues);
 document.getElementById('lyr-all-on').addEventListener('click', () => {
   document.querySelectorAll('input[data-cim-type]').forEach(cb => cb.checked = true);
   applyLayerToggles();
@@ -1210,6 +1302,32 @@ document.querySelectorAll('input[name="viewmode"]').forEach(r => {
 document.getElementById('relayout').addEventListener('click', () => {
   if (model) { graphState = null; graphZoomTransform = d3.zoomIdentity; renderGraph(model); }
 });
+
+// "Toggle worlds": flip geo <-> rel, then re-center & zoom on the selected component.
+function toggleWorld() {
+  const newMode = currentView === 'geo' ? 'rel' : 'geo';
+  // Keep the View-mode radio buttons in sync with the toggle.
+  const radio = document.querySelector(`input[name="viewmode"][value="${newMode}"]`);
+  if (radio) radio.checked = true;
+  setView(newMode);
+
+  if (!selectedDescriptor) return;   // nothing selected → just switch worlds
+  const { kind, obj } = selectedDescriptor;
+  if (newMode === 'rel') {
+    // setView() renders the graph asynchronously the first time; wait for graphState
+    // to exist (or the layout to settle) before zooming.
+    const tryZoom = (attempts) => {
+      if (graphState) zoomAndSelect(kind, obj);
+      else if (attempts > 0) setTimeout(() => tryZoom(attempts - 1), 30);
+    };
+    setTimeout(() => tryZoom(12), 0);
+  } else {
+    // Geo: defer past the map.invalidateSize() that setView() schedules so the
+    // viewport has its real size before we recenter.
+    setTimeout(() => zoomAndSelect(kind, obj), 60);
+  }
+}
+document.getElementById('sel-toggle-world').addEventListener('click', toggleWorld);
 // ---------- Layer state save/restore for view swaps ----------
 const FIXED_LAYER_IDS = ['lyr-terminals','lyr-cn','lbl-equip','lbl-term','lbl-cn'];
 let savedLayerState = null;
