@@ -155,16 +155,6 @@
     <label class="row"><input type="checkbox" id="lbl-term"> Terminal names</label>
     <label class="row"><input type="checkbox" id="lbl-cn"> Connectivity Node names</label>
 
-    <h3>Validation</h3>
-    <label class="row"><input type="checkbox" id="val-acl3"> <span class="warn">Highlight AcLineSegments with ≠2 terminals</span> <span class="badge" id="c-acl3">0</span></label>
-    <label class="row"><input type="checkbox" id="val-orphan-term"> Terminals missing a ConnectivityNode <span class="badge" id="c-orphan">0</span></label>
-    <label class="row"><input type="checkbox" id="val-no-loc"> Equipment missing a Location <span class="badge" id="c-noloc">0</span></label>
-    <label class="row"><input type="checkbox" id="val-abstract"> <span class="warn">Disallowed / abstract CIM classes (e.g. Switch)</span> <span class="badge" id="c-abstract">0</span></label>
-
-    <h3>Issues</h3>
-    <div id="issues" style="font-size:12px;"></div>
-    <div id="abstract-issues" style="font-size:12px; margin-top:6px;"></div>
-
     <div id="selection">
       <h3>Selected component</h3>
       <div id="sel-title">(none — click a feature on the map)</div>
@@ -177,6 +167,18 @@
                 title="Switch between geographic and relationship view, centered and zoomed on the selected component">🌐 Toggle worlds</button>
       </div>
     </div>
+
+    <h3>Validation</h3>
+    <label class="row"><input type="checkbox" id="val-acl3"> <span class="warn">Highlight AcLineSegments with ≠2 terminals</span> <span class="badge" id="c-acl3">0</span></label>
+    <label class="row"><input type="checkbox" id="val-orphan-term"> Terminals missing a ConnectivityNode <span class="badge" id="c-orphan">0</span></label>
+    <label class="row"><input type="checkbox" id="val-no-loc"> Equipment missing a Location <span class="badge" id="c-noloc">0</span></label>
+    <label class="row"><input type="checkbox" id="val-abstract"> <span class="warn">Disallowed / abstract CIM classes (e.g. Switch)</span> <span class="badge" id="c-abstract">0</span></label>
+    <label class="row"><input type="checkbox" id="val-dupid"> <span class="warn">Duplicate rdf:ID values</span> <span class="badge" id="c-dupid">0</span></label>
+
+    <h3>Issues</h3>
+    <div id="issues" style="font-size:12px;"></div>
+    <div id="abstract-issues" style="font-size:12px; margin-top:6px;"></div>
+    <div id="dup-issues" style="font-size:12px; margin-top:6px;"></div>
   </div>
   <div id="resizer" title="Drag to resize"></div>
   <div id="viewport">
@@ -377,6 +379,20 @@ function getDisallowedClassInstances() {
   return model.allTop.filter(o => ABSTRACT_CIM_CLASSES[o.type]);
 }
 
+// rdf:ID must be unique per file. allTop preserves every top-level object (the
+// equipment/terminal maps overwrite on collision), so group by id to find reuse.
+function getDuplicateIds() {
+  if (!model || !model.allTop) return [];
+  const byId = new Map();
+  for (const o of model.allTop) {
+    if (!byId.has(o.id)) byId.set(o.id, []);
+    byId.get(o.id).push(o);
+  }
+  const dups = [];
+  for (const [id, entries] of byId) if (entries.length > 1) dups.push({ id, entries });
+  return dups;
+}
+
 // Centroid of a location (first point or average for line)
 function locCenter(loc) {
   if (!loc || !loc.points.length) return null;
@@ -557,6 +573,7 @@ function render(m) {
   document.getElementById('c-noloc').textContent =
     [...m.equipment.values()].filter(e => !e.locationId || !m.locations.has(e.locationId) || !m.locations.get(e.locationId).points.length).length;
   document.getElementById('c-abstract').textContent = getDisallowedClassInstances().length;
+  document.getElementById('c-dupid').textContent = getDuplicateIds().length;
 
   // issues panel
   const issues = document.getElementById('issues');
@@ -603,6 +620,7 @@ function render(m) {
   }
 
   renderAbstractIssues();
+  renderDuplicateIssues();
   applyLayerToggles();
 }
 
@@ -644,6 +662,40 @@ function renderAbstractIssues() {
       span.style.cssText = 'margin-left:6px; color:#777;';
       span.textContent = '(no location — not shown on map)';
       div.appendChild(span);
+    }
+    box.appendChild(div);
+  }
+}
+
+// Render the "duplicate rdf:ID" issues list. Gated on its checkbox; the count
+// badge is always kept current in render().
+function renderDuplicateIssues() {
+  const box = document.getElementById('dup-issues');
+  box.innerHTML = '';
+  if (!model || !document.getElementById('val-dupid').checked) return;
+
+  const dups = getDuplicateIds();
+  if (!dups.length) {
+    box.innerHTML = '<div style="color:#2e7d32;">No duplicate rdf:ID values found.</div>';
+    return;
+  }
+  const h = document.createElement('div');
+  h.innerHTML = `<b class="warn">Duplicate rdf:ID values (${dups.length})</b> `
+              + `<span style="color:#777;">— each id must be unique per file</span>`;
+  box.appendChild(h);
+
+  for (const d of dups) {
+    const div = document.createElement('div');
+    div.style.margin = '2px 0 6px';
+    div.innerHTML = `• <code>${d.id}</code> reused ${d.entries.length}× — `
+                  + `${d.entries.map(e => e.type).join(' + ')}`;
+    const eq = model.equipment.get(d.id);  // located object sharing the id, if any
+    if (eq) {
+      const btn = document.createElement('button');
+      btn.textContent = 'zoom';
+      btn.style.marginLeft = '6px';
+      btn.onclick = () => zoomAndSelect('equipment', eq);
+      div.appendChild(btn);
     }
     box.appendChild(div);
   }
@@ -856,6 +908,7 @@ document.getElementById('sel-clear').addEventListener('click', () => {
   document.getElementById(id).addEventListener('change', applyLayerToggles);
 });
 document.getElementById('val-abstract').addEventListener('change', renderAbstractIssues);
+document.getElementById('val-dupid').addEventListener('change', renderDuplicateIssues);
 document.getElementById('lyr-all-on').addEventListener('click', () => {
   document.querySelectorAll('input[data-cim-type]').forEach(cb => cb.checked = true);
   applyLayerToggles();
