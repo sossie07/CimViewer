@@ -447,12 +447,22 @@ function getDuplicateIds() {
   return dups;
 }
 
+// Shared reference/context classes: catalogs and container hierarchy that
+// legitimately recur (with the same id) in every file. They are not network
+// topology, and Similix sometimes labels them inconsistently — e.g. BaseVoltage
+// `400` appears as "0.4kV", "400" and "400V" across files — so an id repeat here is
+// never a real collision and must not be flagged regardless of name.
+const CONTEXT_CIM_CLASSES = new Set([
+  'BaseVoltage', 'GeographicalRegion', 'SubGeographicalRegion',
+  'Substation', 'VoltageLevel', 'Bay', 'CoordinateSystem',
+]);
+
 // Cross-file rdf:ID collisions: an id that appears in more than one file is only a
 // problem if it's used for *different* things. Similix deliberately re-exports the
-// same real-world object (shared context like regions/base voltages, and boundary
-// equipment) into every file that touches it — same id, same type, same name — so
-// the networks reconnect on merge. That's expected and not flagged. We flag only a
-// genuine clash: the same id carrying a different type or name across files.
+// same real-world object (shared context, and boundary equipment) into every file
+// that touches it, so the networks reconnect on merge. That's expected and not
+// flagged. We flag only a genuine clash: an id carrying a different type or name
+// across files — and never for shared reference/context classes.
 function getCrossFileCollisions() {
   if (!model || !model.allTop) return [];
   const byId = new Map();
@@ -463,10 +473,11 @@ function getCrossFileCollisions() {
   const out = [];
   for (const [id, entries] of byId) {
     const files = [...new Set(entries.map(e => e.source))];
-    if (files.length < 2) continue;                          // within one file → handled per-file
+    if (files.length < 2) continue;                                  // within one file → handled per-file
+    if (entries.every(e => CONTEXT_CIM_CLASSES.has(e.type))) continue; // shared reference/context data
     const types = new Set(entries.map(e => e.type));
     const names = new Set(entries.map(e => e.name));
-    if (types.size === 1 && names.size === 1) continue;       // same object re-exported → expected
+    if (types.size === 1 && names.size === 1) continue;              // same object re-exported → expected
     out.push({ id, entries, files });
   }
   return out;

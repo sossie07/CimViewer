@@ -92,6 +92,11 @@ Merge rules:
   the boundary ConnectivityNodes) — with the same id, type, and name so the
   networks reconnect on merge. Those same-object repeats are expected and not
   flagged; only a genuine clash (one id, two different things) is reported.
+  Additionally, shared reference/context classes (`BaseVoltage`,
+  `GeographicalRegion`, `SubGeographicalRegion`, `Substation`, `VoltageLevel`,
+  `Bay`, `CoordinateSystem`) are never flagged — they are catalog/hierarchy data
+  that legitimately recurs in every file and Similix may label inconsistently
+  (e.g. `BaseVoltage 400` as "0.4kV"/"400"/"400V").
 
 ## Out of scope (YAGNI)
 
