@@ -254,13 +254,15 @@ function mergeInto(dst, src, name) {
 
 function rebuildModel() {
   if (!loadedFiles.length) { model = null; return; }
-  const equipment = new Map(), terminals = new Map(), cns = new Map(), locations = new Map();
+  const equipment = new Map(), terminals = new Map(), cns = new Map(),
+        locations = new Map(), ptEnds = new Map();
   const allTop = [];
   for (const { name, parsed } of loadedFiles) {
     mergeInto(equipment, parsed.equipment, name);
     mergeInto(terminals, parsed.terminals, name);
     mergeInto(cns,       parsed.cns,       name);
     mergeInto(locations, parsed.locations, name);
+    mergeInto(ptEnds,    parsed.ptEnds,    name);
     for (const o of parsed.allTop) allTop.push(Object.assign({}, o, { source: name }));
   }
   // Rebuild the terminal indexes over the unioned terminals.
@@ -271,7 +273,7 @@ function rebuildModel() {
   }
   for (const arr of termsByEq.values()) arr.sort((a,b) => a.seq - b.seq);
   model = {
-    equipment, terminals, cns, locations, termsByEq, termsByCN, allTop,
+    equipment, terminals, cns, locations, ptEnds, termsByEq, termsByCN, allTop,
     cimNamespace: loadedFiles[0].parsed.cimNamespace,
     cimVersion:   loadedFiles[0].parsed.cimVersion,
   };
@@ -307,6 +309,7 @@ function parseCim(xmlText) {
   const terminals = new Map();     // id -> {id,name,seq,eqId,cnId}
   const cns = new Map();           // id -> {id,name}
   const locations = new Map();     // id -> {id, points: [{seq,x,y}]}
+  const ptEnds = new Map();        // id -> {id,name,txId,terminalId,endNumber,ratedU,baseVoltage}
   const allTop = [];               // every top-level CIM object (for class validation)
 
   // "Equipment" = anything with a PowerSystemResource.Location (discovered dynamically).
@@ -346,6 +349,21 @@ function parseCim(xmlText) {
         cnId: refId(el, 'Terminal.ConnectivityNode'),
         xml: el,
       });
+    } else if (tag === 'PowerTransformerEnd') {
+      // A winding of a transformer. No Location of its own — it ties a PowerTransformer
+      // to a Terminal. (Note: Similix may reuse the transformer's rdf:ID for one end;
+      // the graph keeps them distinct via the 'pte' vs 'equipment' key prefix.)
+      ptEnds.set(id, {
+        id,
+        name: textOf(el, 'IdentifiedObject.name') || id,
+        type: tag,
+        txId: refId(el, 'PowerTransformerEnd.PowerTransformer'),
+        terminalId: refId(el, 'TransformerEnd.Terminal'),
+        endNumber: parseInt(textOf(el, 'TransformerEnd.endNumber') || '0', 10),
+        ratedU: textOf(el, 'PowerTransformerEnd.ratedU'),
+        baseVoltage: refId(el, 'TransformerEnd.BaseVoltage'),
+        xml: el,
+      });
     } else if (tag === 'ConnectivityNode') {
       cns.set(id, { id, name: textOf(el, 'IdentifiedObject.name') || id, xml: el });
     } else if (tag === 'Location') {
@@ -381,7 +399,7 @@ function parseCim(xmlText) {
     termsByCN.get(t.cnId).push(t);
   }
 
-  return { equipment, terminals, cns, locations, termsByEq, termsByCN,
+  return { equipment, terminals, cns, locations, ptEnds, termsByEq, termsByCN,
            allTop, cimNamespace, cimVersion };
 }
 
@@ -954,6 +972,7 @@ function renderSelectionPanel(descriptor) {
   const { kind, obj } = descriptor;
   const typeLabel = kind === 'equipment' ? obj.type
                   : kind === 'terminal'  ? 'Terminal'
+                  : kind === 'pte'       ? 'PowerTransformerEnd'
                   : 'ConnectivityNode';
   title.textContent = `${typeLabel}: ${obj.name || obj.id}`;
   sub.textContent = `id: ${obj.id}`;
@@ -1002,6 +1021,12 @@ function renderSelectionPanel(descriptor) {
     });
     rows.push(['(derived) terminal count', String(terms.length), 'derived']);
     if (peers.length) rows.push(['(derived) connects', peers.join('; '), 'derived']);
+  } else if (kind === 'pte') {
+    const tx = obj.txId ? model.equipment.get(obj.txId) : null;
+    if (tx) rows.push(['(derived) transformer', `${tx.type}:${tx.name}`, 'derived']);
+    const term = obj.terminalId ? model.terminals.get(obj.terminalId) : null;
+    if (term) rows.push(['(derived) terminal', `T${term.seq}:${term.name}`, 'derived']);
+    if (obj.endNumber) rows.push(['(derived) end number', String(obj.endNumber), 'derived']);
   }
 
   // Provenance: which loaded file(s) this object came from (merged models only).
@@ -1174,6 +1199,11 @@ function buildGraph(m) {
                 label: `CN: ${cn.name}` };
     nodes.push(n); nodeById.set(n.key, n);
   }
+  for (const pte of (m.ptEnds ? m.ptEnds.values() : [])) {
+    const n = { key: kindKey('pte', pte.id), kind: 'pte', obj: pte,
+                label: `End ${pte.endNumber}: ${pte.name}` };
+    nodes.push(n); nodeById.set(n.key, n);
+  }
 
   const edges = [];
   for (const t of m.terminals.values()) {
@@ -1183,6 +1213,16 @@ function buildGraph(m) {
     }
     if (t.cnId && nodeById.has(kindKey('cn', t.cnId))) {
       edges.push({ source: tKey, target: kindKey('cn', t.cnId), kind: 'tc' });
+    }
+  }
+  // PowerTransformerEnd ties its transformer to its terminal (like a terminal/CN edge).
+  for (const pte of (m.ptEnds ? m.ptEnds.values() : [])) {
+    const pKey = kindKey('pte', pte.id);
+    if (pte.txId && nodeById.has(kindKey('equipment', pte.txId))) {
+      edges.push({ source: pKey, target: kindKey('equipment', pte.txId), kind: 'pt' });
+    }
+    if (pte.terminalId && nodeById.has(kindKey('terminal', pte.terminalId))) {
+      edges.push({ source: pKey, target: kindKey('terminal', pte.terminalId), kind: 'pe' });
     }
   }
 
@@ -1207,6 +1247,7 @@ function nodeShape(n) {
     return { shape: 'rect', fill: s.color, w: 80, h: 22, rx: 5 };
   }
   if (n.kind === 'terminal') return { shape: 'circle', fill: '#ffc107', r: 7 };
+  if (n.kind === 'pte') return { shape: 'circle', fill: '#ff7043', r: 8 };
   return { shape: 'circle', fill: '#4dd0e1', r: 9 };
 }
 
@@ -1632,6 +1673,9 @@ function searchCandidates(query) {
   }
   for (const cn of model.cns.values()) {
     push('cn', cn, `CN: ${cn.name}`, `${cn.name} ${cn.id}`);
+  }
+  if (model.ptEnds) for (const pte of model.ptEnds.values()) {
+    push('pte', pte, `End ${pte.endNumber}: ${pte.name}`, `${pte.name} ${pte.id}`);
   }
   hits.sort((a, b) => a.score - b.score);
   return hits.slice(0, 30);
