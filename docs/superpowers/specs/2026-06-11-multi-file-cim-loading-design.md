@@ -83,9 +83,15 @@ Merge rules:
   run over each file's own `parsed.allTop` and are reported grouped/labelled by
   file. The known Similix within-file `PowerTransformer == PowerTransformerEnd`
   duplicate is still caught and is not confused by the merge.
-- **New cross-file check.** Report rdf:IDs that appear in more than one file and
-  are **not** `ConnectivityNode`s — i.e. unexpected overlaps beyond legitimate
-  boundary CNs. Shared boundary CNs are normal and are not flagged.
+- **New cross-file check.** Report rdf:IDs that appear in more than one file
+  **only when they identify a different object** (the type or
+  `IdentifiedObject.name` disagrees across files). Similix deliberately
+  re-exports the *same* real-world object into every file that touches it —
+  shared context (regions, base voltages, coordinate systems, substations) and
+  boundary equipment (the boundary device plus its terminals/location/points and
+  the boundary ConnectivityNodes) — with the same id, type, and name so the
+  networks reconnect on merge. Those same-object repeats are expected and not
+  flagged; only a genuine clash (one id, two different things) is reported.
 
 ## Out of scope (YAGNI)
 

@@ -182,7 +182,7 @@
     <label class="row"><input type="checkbox" id="val-no-loc"> Equipment missing a Location <span class="badge" id="c-noloc">0</span></label>
     <label class="row"><input type="checkbox" id="val-abstract"> <span class="warn">Disallowed / abstract CIM classes (e.g. Switch)</span> <span class="badge" id="c-abstract">0</span></label>
     <label class="row"><input type="checkbox" id="val-dupid"> <span class="warn">Duplicate rdf:ID values (per file)</span> <span class="badge" id="c-dupid">0</span></label>
-    <label class="row"><input type="checkbox" id="val-xfile"> <span class="warn">Cross-file rdf:ID collisions (non-CN)</span> <span class="badge" id="c-xfile">0</span></label>
+    <label class="row"><input type="checkbox" id="val-xfile"> <span class="warn">Cross-file rdf:ID collisions (different object, same id)</span> <span class="badge" id="c-xfile">0</span></label>
 
     <h3>Issues</h3>
     <div id="issues" style="font-size:12px;"></div>
@@ -447,9 +447,12 @@ function getDuplicateIds() {
   return dups;
 }
 
-// Cross-file rdf:ID collisions: ids that appear in more than one file. Shared
-// ConnectivityNodes are the legitimate way networks connect, so an id used only by
-// ConnectivityNodes is expected and not flagged — anything else is an unexpected overlap.
+// Cross-file rdf:ID collisions: an id that appears in more than one file is only a
+// problem if it's used for *different* things. Similix deliberately re-exports the
+// same real-world object (shared context like regions/base voltages, and boundary
+// equipment) into every file that touches it — same id, same type, same name — so
+// the networks reconnect on merge. That's expected and not flagged. We flag only a
+// genuine clash: the same id carrying a different type or name across files.
 function getCrossFileCollisions() {
   if (!model || !model.allTop) return [];
   const byId = new Map();
@@ -460,8 +463,10 @@ function getCrossFileCollisions() {
   const out = [];
   for (const [id, entries] of byId) {
     const files = [...new Set(entries.map(e => e.source))];
-    if (files.length < 2) continue;                                  // within one file → handled per-file
-    if (entries.every(e => e.type === 'ConnectivityNode')) continue; // boundary CN → expected
+    if (files.length < 2) continue;                          // within one file → handled per-file
+    const types = new Set(entries.map(e => e.type));
+    const names = new Set(entries.map(e => e.name));
+    if (types.size === 1 && names.size === 1) continue;       // same object re-exported → expected
     out.push({ id, entries, files });
   }
   return out;
@@ -791,13 +796,13 @@ function renderCollisionIssues() {
   }
   const cols = getCrossFileCollisions();
   if (!cols.length) {
-    box.innerHTML = '<div style="color:#2e7d32;">No unexpected cross-file rdf:ID collisions '
-                  + '(shared ConnectivityNodes are expected and not flagged).</div>';
+    box.innerHTML = '<div style="color:#2e7d32;">No cross-file rdf:ID collisions '
+                  + '(an id shared by the same object in multiple files is expected and not flagged).</div>';
     return;
   }
   const h = document.createElement('div');
   h.innerHTML = `<b class="warn">Cross-file rdf:ID collisions (${cols.length})</b> `
-              + `<span style="color:#777;">— same id in different files (excludes boundary CNs)</span>`;
+              + `<span style="color:#777;">— same id used for a different object across files</span>`;
   box.appendChild(h);
 
   for (const c of cols) {
