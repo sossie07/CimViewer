@@ -120,10 +120,18 @@
   <div id="sidebar">
     <h2>CIM Network Viewer</h2>
     <label id="filelabel">
-      Load CIM XML file…
-      <input id="fileinput" type="file" accept=".xml" style="display:none">
+      Load CIM XML file(s)…
+      <input id="fileinput" type="file" accept=".xml" multiple style="display:none">
     </label>
     <div id="status">No file loaded.</div>
+
+    <div id="loaded-files-box" style="margin-top:6px; display:none;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span style="font-size:11px; color:#555;">Loaded files:</span>
+        <button id="files-clear-all" type="button" style="font-size:11px; padding:1px 6px;">Clear all</button>
+      </div>
+      <div id="loaded-files" style="font-size:12px; margin-top:3px;"></div>
+    </div>
 
     <h3>Search</h3>
     <div id="search-box">
@@ -173,12 +181,14 @@
     <label class="row"><input type="checkbox" id="val-orphan-term"> Terminals missing a ConnectivityNode <span class="badge" id="c-orphan">0</span></label>
     <label class="row"><input type="checkbox" id="val-no-loc"> Equipment missing a Location <span class="badge" id="c-noloc">0</span></label>
     <label class="row"><input type="checkbox" id="val-abstract"> <span class="warn">Disallowed / abstract CIM classes (e.g. Switch)</span> <span class="badge" id="c-abstract">0</span></label>
-    <label class="row"><input type="checkbox" id="val-dupid"> <span class="warn">Duplicate rdf:ID values</span> <span class="badge" id="c-dupid">0</span></label>
+    <label class="row"><input type="checkbox" id="val-dupid"> <span class="warn">Duplicate rdf:ID values (per file)</span> <span class="badge" id="c-dupid">0</span></label>
+    <label class="row"><input type="checkbox" id="val-xfile"> <span class="warn">Cross-file rdf:ID collisions (non-CN)</span> <span class="badge" id="c-xfile">0</span></label>
 
     <h3>Issues</h3>
     <div id="issues" style="font-size:12px;"></div>
     <div id="abstract-issues" style="font-size:12px; margin-top:6px;"></div>
     <div id="dup-issues" style="font-size:12px; margin-top:6px;"></div>
+    <div id="xfile-issues" style="font-size:12px; margin-top:6px;"></div>
   </div>
   <div id="resizer" title="Drag to resize"></div>
   <div id="viewport">
@@ -225,7 +235,47 @@ const layers = {
   validationOverlay: L.layerGroup().addTo(map),
 };
 
-let model = null; // populated after parse
+let model = null;        // derived merged model (rebuilt from loadedFiles)
+let loadedFiles = [];    // [{ name, parsed }] — one raw parseCim() result per file
+
+// ---------- Multi-file merge ----------
+// Networks exported as separate files connect at shared ConnectivityNode rdf:IDs
+// (Similix CN ids are deterministic: {ownerGID}.{seq}.CN). So the merged model is
+// a union of every file's maps keyed by rdf:ID — same id across files = same object,
+// which stitches the boundaries together. Each merged object carries `sources`
+// (the set of files it came from) for provenance.
+function mergeInto(dst, src, name) {
+  for (const [id, obj] of src) {
+    const existing = dst.get(id);
+    if (existing) existing.sources.add(name);
+    else dst.set(id, Object.assign({}, obj, { sources: new Set([name]) }));
+  }
+}
+
+function rebuildModel() {
+  if (!loadedFiles.length) { model = null; return; }
+  const equipment = new Map(), terminals = new Map(), cns = new Map(), locations = new Map();
+  const allTop = [];
+  for (const { name, parsed } of loadedFiles) {
+    mergeInto(equipment, parsed.equipment, name);
+    mergeInto(terminals, parsed.terminals, name);
+    mergeInto(cns,       parsed.cns,       name);
+    mergeInto(locations, parsed.locations, name);
+    for (const o of parsed.allTop) allTop.push(Object.assign({}, o, { source: name }));
+  }
+  // Rebuild the terminal indexes over the unioned terminals.
+  const termsByEq = new Map(), termsByCN = new Map();
+  for (const t of terminals.values()) {
+    if (t.eqId) { if (!termsByEq.has(t.eqId)) termsByEq.set(t.eqId, []); termsByEq.get(t.eqId).push(t); }
+    if (t.cnId) { if (!termsByCN.has(t.cnId)) termsByCN.set(t.cnId, []); termsByCN.get(t.cnId).push(t); }
+  }
+  for (const arr of termsByEq.values()) arr.sort((a,b) => a.seq - b.seq);
+  model = {
+    equipment, terminals, cns, locations, termsByEq, termsByCN, allTop,
+    cimNamespace: loadedFiles[0].parsed.cimNamespace,
+    cimVersion:   loadedFiles[0].parsed.cimVersion,
+  };
+}
 
 // ---------- Parsing ----------
 const CIM = 'http://iec.ch/TC57/CIM100#';
@@ -379,18 +429,42 @@ function getDisallowedClassInstances() {
   return model.allTop.filter(o => ABSTRACT_CIM_CLASSES[o.type]);
 }
 
-// rdf:ID must be unique per file. allTop preserves every top-level object (the
-// equipment/terminal maps overwrite on collision), so group by id to find reuse.
+// rdf:ID must be unique *within* a file. allTop preserves every top-level object
+// (the equipment/terminal maps overwrite on collision), so group by id per file to
+// find reuse — done per-file so a shared boundary CN across files isn't miscounted.
 function getDuplicateIds() {
+  if (!loadedFiles.length) return [];
+  const dups = [];
+  for (const { name, parsed } of loadedFiles) {
+    const byId = new Map();
+    for (const o of parsed.allTop) {
+      if (!byId.has(o.id)) byId.set(o.id, []);
+      byId.get(o.id).push(o);
+    }
+    for (const [id, entries] of byId)
+      if (entries.length > 1) dups.push({ id, entries, source: name });
+  }
+  return dups;
+}
+
+// Cross-file rdf:ID collisions: ids that appear in more than one file. Shared
+// ConnectivityNodes are the legitimate way networks connect, so an id used only by
+// ConnectivityNodes is expected and not flagged — anything else is an unexpected overlap.
+function getCrossFileCollisions() {
   if (!model || !model.allTop) return [];
   const byId = new Map();
   for (const o of model.allTop) {
     if (!byId.has(o.id)) byId.set(o.id, []);
     byId.get(o.id).push(o);
   }
-  const dups = [];
-  for (const [id, entries] of byId) if (entries.length > 1) dups.push({ id, entries });
-  return dups;
+  const out = [];
+  for (const [id, entries] of byId) {
+    const files = [...new Set(entries.map(e => e.source))];
+    if (files.length < 2) continue;                                  // within one file → handled per-file
+    if (entries.every(e => e.type === 'ConnectivityNode')) continue; // boundary CN → expected
+    out.push({ id, entries, files });
+  }
+  return out;
 }
 
 // Centroid of a location (first point or average for line)
@@ -574,6 +648,7 @@ function render(m) {
     [...m.equipment.values()].filter(e => !e.locationId || !m.locations.has(e.locationId) || !m.locations.get(e.locationId).points.length).length;
   document.getElementById('c-abstract').textContent = getDisallowedClassInstances().length;
   document.getElementById('c-dupid').textContent = getDuplicateIds().length;
+  document.getElementById('c-xfile').textContent = getCrossFileCollisions().length;
 
   // issues panel
   const issues = document.getElementById('issues');
@@ -621,6 +696,7 @@ function render(m) {
 
   renderAbstractIssues();
   renderDuplicateIssues();
+  renderCollisionIssues();
   applyLayerToggles();
 }
 
@@ -648,7 +724,8 @@ function renderAbstractIssues() {
     const div = document.createElement('div');
     div.style.margin = '2px 0 6px';
     div.innerHTML = `• <code>${o.name}</code> is a <b class="warn">${o.type}</b> (abstract) — `
-                  + `use ${info.use.join(', ')}`;
+                  + `use ${info.use.join(', ')}`
+                  + (o.source ? ` <span style="color:#777;">[${o.source}]</span>` : '');
     const eq = model.equipment.get(o.id);
     if (eq) {
       const btn = document.createElement('button');
@@ -688,8 +765,48 @@ function renderDuplicateIssues() {
     const div = document.createElement('div');
     div.style.margin = '2px 0 6px';
     div.innerHTML = `• <code>${d.id}</code> reused ${d.entries.length}× — `
-                  + `${d.entries.map(e => e.type).join(' + ')}`;
+                  + `${d.entries.map(e => e.type).join(' + ')}`
+                  + (d.source ? ` <span style="color:#777;">[${d.source}]</span>` : '');
     const eq = model.equipment.get(d.id);  // located object sharing the id, if any
+    if (eq) {
+      const btn = document.createElement('button');
+      btn.textContent = 'zoom';
+      btn.style.marginLeft = '6px';
+      btn.onclick = () => zoomAndSelect('equipment', eq);
+      div.appendChild(btn);
+    }
+    box.appendChild(div);
+  }
+}
+
+// Render the "cross-file rdf:ID collision" list. Gated on its checkbox; badge kept
+// current in render(). Only fires with ≥2 files loaded.
+function renderCollisionIssues() {
+  const box = document.getElementById('xfile-issues');
+  box.innerHTML = '';
+  if (!model || !document.getElementById('val-xfile').checked) return;
+  if (loadedFiles.length < 2) {
+    box.innerHTML = '<div style="color:#777;">Load 2+ files to check for cross-file id collisions.</div>';
+    return;
+  }
+  const cols = getCrossFileCollisions();
+  if (!cols.length) {
+    box.innerHTML = '<div style="color:#2e7d32;">No unexpected cross-file rdf:ID collisions '
+                  + '(shared ConnectivityNodes are expected and not flagged).</div>';
+    return;
+  }
+  const h = document.createElement('div');
+  h.innerHTML = `<b class="warn">Cross-file rdf:ID collisions (${cols.length})</b> `
+              + `<span style="color:#777;">— same id in different files (excludes boundary CNs)</span>`;
+  box.appendChild(h);
+
+  for (const c of cols) {
+    const div = document.createElement('div');
+    div.style.margin = '2px 0 6px';
+    const types = [...new Set(c.entries.map(e => e.type))].join(' + ');
+    div.innerHTML = `• <code>${c.id}</code> — ${types} `
+                  + `<span style="color:#777;">[${c.files.join(', ')}]</span>`;
+    const eq = model.equipment.get(c.id);
     if (eq) {
       const btn = document.createElement('button');
       btn.textContent = 'zoom';
@@ -871,6 +988,11 @@ function renderSelectionPanel(descriptor) {
     if (peers.length) rows.push(['(derived) connects', peers.join('; '), 'derived']);
   }
 
+  // Provenance: which loaded file(s) this object came from (merged models only).
+  if (obj.sources && obj.sources.size) {
+    rows.push(['(derived) source file(s)', [...obj.sources].join(', '), 'derived']);
+  }
+
   for (const [k, v, kind2] of rows) {
     const tr = document.createElement('tr');
     const th = document.createElement('th'); th.textContent = k;
@@ -909,6 +1031,7 @@ document.getElementById('sel-clear').addEventListener('click', () => {
 });
 document.getElementById('val-abstract').addEventListener('change', renderAbstractIssues);
 document.getElementById('val-dupid').addEventListener('change', renderDuplicateIssues);
+document.getElementById('val-xfile').addEventListener('change', renderCollisionIssues);
 document.getElementById('lyr-all-on').addEventListener('click', () => {
   document.querySelectorAll('input[data-cim-type]').forEach(cb => cb.checked = true);
   applyLayerToggles();
@@ -918,23 +1041,92 @@ document.getElementById('lyr-all-off').addEventListener('click', () => {
   applyLayerToggles();
 });
 
+// Additive multi-file load: each picked file is parsed and appended to loadedFiles
+// (re-picking a name replaces that entry — this is also what fixes the same-name
+// reload bug, together with resetting input.value so `change` fires again).
 document.getElementById('fileinput').addEventListener('change', async (e) => {
-  const f = e.target.files[0];
-  if (!f) return;
-  const text = await f.text();
-  loadText(text, f.name);
+  const files = Array.from(e.target.files);
+  e.target.value = '';   // allow re-selecting the same filename later
+  if (!files.length) return;
+  const errors = [];
+  for (const f of files) {
+    try {
+      const parsed = parseCim(await f.text());
+      const idx = loadedFiles.findIndex(lf => lf.name === f.name);
+      if (idx >= 0) loadedFiles[idx] = { name: f.name, parsed };
+      else loadedFiles.push({ name: f.name, parsed });
+    } catch (err) {
+      errors.push(`${f.name}: ${err.message}`);
+      console.error(f.name, err);
+    }
+  }
+  refreshAll(errors);
 });
 
-function loadText(text, name) {
-  try {
-    model = parseCim(text);
+document.getElementById('files-clear-all').addEventListener('click', () => {
+  loadedFiles = [];
+  refreshAll();
+});
+
+// Rebuild the merged model from loadedFiles and refresh every view/panel.
+function refreshAll(errors) {
+  rebuildModel();
+  renderLoadedFiles();
+
+  if (!model) {
+    // Empty state: clear both views, reset selection, zero the counts.
+    Object.values(layers).forEach(l => l.clearLayers());
+    selectedLayer = null; selectedOrigStyle = null; selectedDescriptor = null;
+    graphState = null;
+    if (simulation) { simulation.stop(); simulation = null; }
+    document.getElementById('graph-nodes').innerHTML = '';
+    document.getElementById('graph-edges').innerHTML = '';
+    document.getElementById('sel-title').textContent = '(none — click a feature on the map)';
+    document.getElementById('sel-sub').textContent = '';
+    document.querySelector('#sel-attrs tbody').innerHTML = '';
+    document.getElementById('sel-related').innerHTML = '';
+    document.getElementById('type-list').innerHTML = '';
+    ['c-term','c-cn','c-acl3','c-orphan','c-noloc','c-abstract','c-dupid','c-xfile']
+      .forEach(id => document.getElementById(id).textContent = '0');
+    ['issues','abstract-issues','dup-issues','xfile-issues']
+      .forEach(id => document.getElementById(id).innerHTML = '');
     document.getElementById('status').textContent =
-      `Loaded ${name}: ${model.equipment.size} equipment, ${model.terminals.size} terminals, ${model.cns.size} CNs.`;
-    render(model);
-    if (currentView === 'rel') renderGraph(model);
-  } catch (e) {
-    document.getElementById('status').textContent = 'Parse error: ' + e.message;
-    console.error(e);
+      (errors && errors.length) ? ('Parse error — ' + errors.join('; ')) : 'No file loaded.';
+    return;
+  }
+
+  const fileWord = loadedFiles.length === 1 ? 'file' : 'files';
+  let status = `${loadedFiles.length} ${fileWord}: ${model.equipment.size} equipment, `
+             + `${model.terminals.size} terminals, ${model.cns.size} CNs.`;
+  if (errors && errors.length) status += `  ⚠ ${errors.length} failed: ${errors.join('; ')}`;
+  document.getElementById('status').textContent = status;
+
+  render(model);
+  if (currentView === 'rel') { graphState = null; renderGraph(model); }
+}
+
+// "Loaded files" sidebar list with a per-file remove (×) button.
+function renderLoadedFiles() {
+  const wrap = document.getElementById('loaded-files-box');
+  const box = document.getElementById('loaded-files');
+  box.innerHTML = '';
+  if (!loadedFiles.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = 'block';
+  for (const lf of loadedFiles) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.cssText = 'justify-content:space-between; gap:6px; align-items:center;';
+    const span = document.createElement('span');
+    span.textContent = `${lf.name} — ${lf.parsed.equipment.size} eq`;
+    span.title = lf.name;
+    span.style.cssText = 'overflow:hidden; text-overflow:ellipsis; white-space:nowrap;';
+    const btn = document.createElement('button');
+    btn.textContent = '×';
+    btn.title = 'Remove this file';
+    btn.style.cssText = 'padding:0 7px; flex:none;';
+    btn.onclick = () => { loadedFiles = loadedFiles.filter(x => x !== lf); refreshAll(); };
+    row.appendChild(span); row.appendChild(btn);
+    box.appendChild(row);
   }
 }
 
