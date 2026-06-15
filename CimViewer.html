@@ -189,6 +189,7 @@
     <div id="abstract-issues" style="font-size:12px; margin-top:6px;"></div>
     <div id="dup-issues" style="font-size:12px; margin-top:6px;"></div>
     <div id="xfile-issues" style="font-size:12px; margin-top:6px;"></div>
+    <div id="noloc-issues" style="font-size:12px; margin-top:6px;"></div>
   </div>
   <div id="resizer" title="Drag to resize"></div>
   <div id="viewport">
@@ -501,6 +502,16 @@ function getCrossFileCollisions() {
   return out;
 }
 
+// Equipment with no usable Location: either no locationId, an unresolved
+// locationId, or a Location that carries no PositionPoints. Such objects can't be
+// placed on the map — they're only reachable in the relationship view.
+function getNoLocationEquipment() {
+  if (!model) return [];
+  return [...model.equipment.values()].filter(e =>
+    !e.locationId || !model.locations.has(e.locationId)
+    || !model.locations.get(e.locationId).points.length);
+}
+
 // Centroid of a location (first point or average for line)
 function locCenter(loc) {
   if (!loc || !loc.points.length) return null;
@@ -678,8 +689,7 @@ function render(m) {
   document.getElementById('c-acl3').textContent = badAcls.length;
   document.getElementById('c-orphan').textContent =
     [...m.terminals.values()].filter(t => !t.cnId).length;
-  document.getElementById('c-noloc').textContent =
-    [...m.equipment.values()].filter(e => !e.locationId || !m.locations.has(e.locationId) || !m.locations.get(e.locationId).points.length).length;
+  document.getElementById('c-noloc').textContent = getNoLocationEquipment().length;
   document.getElementById('c-abstract').textContent = getDisallowedClassInstances().length;
   document.getElementById('c-dupid').textContent = getDuplicateIds().length;
   document.getElementById('c-xfile').textContent = getCrossFileCollisions().length;
@@ -731,6 +741,7 @@ function render(m) {
   renderAbstractIssues();
   renderDuplicateIssues();
   renderCollisionIssues();
+  renderNoLocationIssues();
   applyLayerToggles();
 }
 
@@ -848,6 +859,40 @@ function renderCollisionIssues() {
       btn.onclick = () => zoomAndSelect('equipment', eq);
       div.appendChild(btn);
     }
+    box.appendChild(div);
+  }
+}
+
+// Render the "equipment missing a Location" list. Gated on its checkbox; the count
+// badge is always kept current in render(). These objects have no map position, so
+// the zoom button centres them in the relationship view (and selects them, also
+// populating the selection panel in geo view).
+function renderNoLocationIssues() {
+  const box = document.getElementById('noloc-issues');
+  box.innerHTML = '';
+  if (!model || !document.getElementById('val-no-loc').checked) return;
+
+  const noLoc = getNoLocationEquipment();
+  if (!noLoc.length) {
+    box.innerHTML = '<div style="color:#2e7d32;">All equipment has a Location.</div>';
+    return;
+  }
+  const h = document.createElement('div');
+  h.innerHTML = `<b class="warn">Equipment missing a Location (${noLoc.length})</b> `
+              + `<span style="color:#777;">— not placed on the map; zoom uses the relationship view</span>`;
+  box.appendChild(h);
+
+  for (const eq of noLoc) {
+    const div = document.createElement('div');
+    div.style.margin = '2px 0 6px';
+    div.innerHTML = `• <code>${eq.name || eq.id}</code> <b class="warn">${eq.type}</b>`;
+    const btn = document.createElement('button');
+    btn.textContent = 'zoom';
+    btn.style.marginLeft = '6px';
+    // zoomAndSelect handles the no-map-layer case (relationship view centring +
+    // selection panel) gracefully for location-less equipment.
+    btn.onclick = () => zoomAndSelect('equipment', eq);
+    div.appendChild(btn);
     box.appendChild(div);
   }
 }
@@ -1067,12 +1112,13 @@ document.getElementById('sel-clear').addEventListener('click', () => {
 // ---------- Events ----------
 ['lyr-terminals','lyr-cn',
  'lbl-equip','lbl-term','lbl-cn',
- 'val-acl3','val-orphan-term','val-no-loc'].forEach(id => {
+ 'val-acl3','val-orphan-term'].forEach(id => {
   document.getElementById(id).addEventListener('change', applyLayerToggles);
 });
 document.getElementById('val-abstract').addEventListener('change', renderAbstractIssues);
 document.getElementById('val-dupid').addEventListener('change', renderDuplicateIssues);
 document.getElementById('val-xfile').addEventListener('change', renderCollisionIssues);
+document.getElementById('val-no-loc').addEventListener('change', renderNoLocationIssues);
 document.getElementById('lyr-all-on').addEventListener('click', () => {
   document.querySelectorAll('input[data-cim-type]').forEach(cb => cb.checked = true);
   applyLayerToggles();
@@ -1129,7 +1175,7 @@ function refreshAll(errors) {
     document.getElementById('type-list').innerHTML = '';
     ['c-term','c-cn','c-acl3','c-orphan','c-noloc','c-abstract','c-dupid','c-xfile']
       .forEach(id => document.getElementById(id).textContent = '0');
-    ['issues','abstract-issues','dup-issues','xfile-issues']
+    ['issues','abstract-issues','dup-issues','xfile-issues','noloc-issues']
       .forEach(id => document.getElementById(id).innerHTML = '');
     document.getElementById('status').textContent =
       (errors && errors.length) ? ('Parse error — ' + errors.join('; ')) : 'No file loaded.';
