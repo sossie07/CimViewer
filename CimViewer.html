@@ -41,6 +41,13 @@
     0%, 100% { opacity: 0.7; }
     50%      { opacity: 1; }
   }
+  /* Missing-Location highlight — amber, to distinguish from the red ≠2-terminal "bad". */
+  #graph g.node.noloc rect, #graph g.node.noloc circle {
+    stroke: #e65100; stroke-width: 2.5;
+    fill: #ffa726 !important;
+    filter: drop-shadow(0 0 8px #ffb74d);
+  }
+  #graph g.node.noloc text { fill: #e65100; font-weight: 700; }
   #graph g.node.hidden { display: none; }
   #graph g.node text.hidden { display: none; }
   #mode-box { background:#fff; border:1px solid #bbb; border-radius:4px; padding:6px 8px; margin-top:6px; }
@@ -1125,7 +1132,10 @@ document.getElementById('sel-clear').addEventListener('click', () => {
 document.getElementById('val-abstract').addEventListener('change', renderAbstractIssues);
 document.getElementById('val-dupid').addEventListener('change', renderDuplicateIssues);
 document.getElementById('val-xfile').addEventListener('change', renderCollisionIssues);
-document.getElementById('val-no-loc').addEventListener('change', renderNoLocationIssues);
+document.getElementById('val-no-loc').addEventListener('change', () => {
+  renderNoLocationIssues();
+  applyLayerTogglesGraph();   // refresh the relationship-view highlight
+});
 document.getElementById('lyr-all-on').addEventListener('click', () => {
   document.querySelectorAll('input[data-cim-type]').forEach(cb => cb.checked = true);
   applyLayerToggles();
@@ -1291,6 +1301,15 @@ function buildGraph(m) {
     }
   }
 
+  // Flag equipment with no usable Location — same rule as the geo render-skip and the
+  // "Equipment missing a Location" check — so the relationship view can highlight them.
+  for (const eq of m.equipment.values()) {
+    const loc = m.locations.get(eq.locationId);
+    if (!eq.locationId || !loc || !loc.points.length) {
+      nodeById.get(kindKey('equipment', eq.id)).noLoc = true;
+    }
+  }
+
   return { nodes, edges, nodeById };
 }
 
@@ -1428,7 +1447,7 @@ function renderGraph(m) {
   const nodeElByKey = new Map();
   for (const n of nodes) {
     const g = document.createElementNS(SVG_NS, 'g');
-    g.setAttribute('class', 'node kind-' + n.kind + (n.bad ? ' bad' : ''));
+    g.setAttribute('class', 'node kind-' + n.kind + (n.bad ? ' bad' : '') + (n.noLoc ? ' noloc' : ''));
     g.dataset.key = n.key;
 
     const sh = nodeShape(n);
@@ -1566,6 +1585,7 @@ function applyLayerTogglesGraph() {
   const lblTerm   = document.getElementById('lbl-term').checked;
   const lblCN     = document.getElementById('lbl-cn').checked;
   const showBad   = document.getElementById('val-acl3').checked;
+  const showNoLoc = document.getElementById('val-no-loc').checked;
 
   for (const n of graphState.nodes) {
     let visible = true;
@@ -1589,6 +1609,10 @@ function applyLayerTogglesGraph() {
     // bad highlighting toggle
     if (n.bad) {
       n.el.classList.toggle('bad', showBad);
+    }
+    // missing-Location highlighting toggle
+    if (n.noLoc) {
+      n.el.classList.toggle('noloc', showNoLoc);
     }
   }
 
