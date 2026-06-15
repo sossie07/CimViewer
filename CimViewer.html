@@ -864,9 +864,9 @@ function renderCollisionIssues() {
 }
 
 // Render the "equipment missing a Location" list. Gated on its checkbox; the count
-// badge is always kept current in render(). These objects have no map position, so
-// the zoom button centres them in the relationship view (and selects them, also
-// populating the selection panel in geo view).
+// badge is always kept current in render(). A flagged object fails the exact check
+// the geo renderer uses to skip drawing it, so it has no map marker — the zoom button
+// therefore switches to the relationship view (where it always exists as a node).
 function renderNoLocationIssues() {
   const box = document.getElementById('noloc-issues');
   box.innerHTML = '';
@@ -879,19 +879,26 @@ function renderNoLocationIssues() {
   }
   const h = document.createElement('div');
   h.innerHTML = `<b class="warn">Equipment missing a Location (${noLoc.length})</b> `
-              + `<span style="color:#777;">— not placed on the map; zoom uses the relationship view</span>`;
+              + `<span style="color:#777;">— no map position; zoom switches to the relationship view</span>`;
   box.appendChild(h);
 
   for (const eq of noLoc) {
     const div = document.createElement('div');
     div.style.margin = '2px 0 6px';
-    div.innerHTML = `• <code>${eq.name || eq.id}</code> <b class="warn">${eq.type}</b>`;
+    // Spell out *why* it's flagged — the same condition the geo renderer uses to skip
+    // it. Helps tell a genuine data gap from a dangling/empty Location reference.
+    let reason;
+    if (!eq.locationId) reason = 'no Location reference';
+    else if (!model.locations.has(eq.locationId)) reason = `Location <code>${eq.locationId}</code> not found`;
+    else reason = `Location <code>${eq.locationId}</code> has no PositionPoints`;
+    div.innerHTML = `• <code>${eq.name || eq.id}</code> <b class="warn">${eq.type}</b> `
+                  + `<span style="color:#777;">— ${reason}</span>`;
     const btn = document.createElement('button');
     btn.textContent = 'zoom';
     btn.style.marginLeft = '6px';
-    // zoomAndSelect handles the no-map-layer case (relationship view centring +
-    // selection panel) gracefully for location-less equipment.
-    btn.onclick = () => zoomAndSelect('equipment', eq);
+    // Location-less equipment can't be shown on the map, so zoom takes us to the
+    // relationship view where it exists as a node.
+    btn.onclick = () => zoomToNoLocation(eq);
     div.appendChild(btn);
     box.appendChild(div);
   }
@@ -1725,6 +1732,22 @@ function searchCandidates(query) {
   }
   hits.sort((a, b) => a.score - b.score);
   return hits.slice(0, 30);
+}
+
+// Location-less equipment has no map position, so a geographic zoom has nothing to
+// target. It only exists as a node in the relationship view — so switch to that view
+// first (if needed), then centre on it once the graph has rendered. Mirrors the
+// async graphState wait in toggleWorld().
+function zoomToNoLocation(eq) {
+  if (currentView === 'rel') { zoomAndSelect('equipment', eq); return; }
+  const radio = document.querySelector('input[name="viewmode"][value="rel"]');
+  if (radio) radio.checked = true;
+  setView('rel');
+  const tryZoom = (attempts) => {
+    if (graphState) zoomAndSelect('equipment', eq);
+    else if (attempts > 0) setTimeout(() => tryZoom(attempts - 1), 30);
+  };
+  setTimeout(() => tryZoom(12), 0);
 }
 
 function zoomAndSelect(kind, obj) {
