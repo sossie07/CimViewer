@@ -75,6 +75,16 @@
   .leaflet-tooltip.cim-label.terminal { background: rgba(255,240,200,0.9); }
   .leaflet-tooltip.cim-label.cn { background: rgba(220,240,255,0.9); }
   .leaflet-tooltip.cim-label.bad { background: #ffbaba; border-color: #b00020; color: #b00020; font-weight: 700; }
+  #no-geo-msg {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    z-index: 1000; background: #fff3cd; color: #856404; border: 1px solid #ffc107;
+    border-radius: 8px; padding: 16px 22px; max-width: 460px; text-align: center;
+    font: 13px/1.5 system-ui, sans-serif; box-shadow: 0 2px 10px rgba(0,0,0,.18);
+  }
+  #no-geo-msg button {
+    margin-top: 10px; padding: 6px 14px; cursor: pointer; font-size: 13px;
+    background: #1565c0; color: #fff; border: none; border-radius: 5px;
+  }
   #status { color: #444; font-size: 12px; margin-top: 6px; }
   #filelabel { display: block; padding: 6px; background: #fff; border: 1px dashed #888; text-align: center; cursor: pointer; }
   button { margin-top: 4px; }
@@ -212,8 +222,39 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/proj4@2.11.0/dist/proj4.js"></script>
 <script>
 "use strict";
+
+// ---------- Coordinate reprojection ----------
+// Some CIM exports lay equipment out with cim:DiagramObject coordinates in a
+// *projected* CRS (e.g. Similix uses EPSG:2193, NZ Transverse Mercator, in metres)
+// instead of cim:Location/PositionPoint in WGS84 lon/lat. Those metre coordinates
+// can't go straight on a lat/lon slippy map, so we reproject them. proj4 ships
+// WGS84; we register the projected CRSes we expect to meet. Extend PROJ_DEFS to
+// support another EPSG code.
+const PROJ_DEFS = {
+  2193: '+proj=tmerc +lat_0=0 +lon_0=173 +k=0.9996 +x_0=1600000 +y_0=10000000 '
+      + '+ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs',  // NZTM2000
+};
+if (typeof proj4 !== 'undefined') {
+  for (const [code, def] of Object.entries(PROJ_DEFS)) proj4.defs('EPSG:' + code, def);
+}
+
+// Reproject [{seq,x,y}] from the given EPSG code to WGS84, returning points whose
+// x = longitude, y = latitude (matching how PositionPoint is stored, so the rest of
+// the renderer is unchanged). epsg 4326 / null = already lon/lat → passthrough.
+// Returns null when we can't reproject (proj4 missing, or unknown EPSG) so the caller
+// can treat the equipment as position-less (relationship-view only).
+function reprojectPoints(points, epsg) {
+  if (!epsg || epsg === 4326) return points.map(p => ({ seq: p.seq, x: p.x, y: p.y }));
+  const def = 'EPSG:' + epsg;
+  if (typeof proj4 === 'undefined' || !PROJ_DEFS[epsg]) return null;
+  return points.map(p => {
+    const [lon, lat] = proj4(def, 'WGS84', [p.x, p.y]);
+    return { seq: p.seq, x: lon, y: lat };
+  });
+}
 
 document.getElementById('splash-close').addEventListener('click', () => {
   document.getElementById('splash-overlay').remove();
@@ -291,14 +332,27 @@ function rebuildModel() {
 const CIM = 'http://iec.ch/TC57/CIM100#';
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 
+// CIM class names vary across tools/versions (IEC and CIM16 exports write
+// "ACLineSegment"; the CIM100/Evolve corpus writes "AcLineSegment"). Normalising the
+// known variants to one canonical spelling at parse time keeps the type-driven
+// rendering, styling and validation (ACLS ≠2-terminal check, terminal placement)
+// working regardless of the source spelling. Extend as further variants turn up.
+const TYPE_ALIASES = {
+  ACLineSegment: 'AcLineSegment',
+};
+function canonType(tag) { return TYPE_ALIASES[tag] || tag; }
+
+// el is always a cim element, so its own namespaceURI is the file's cim namespace —
+// use it rather than a hardcoded constant so files declaring an older/different CIM
+// namespace (e.g. CIM-schema-cim16) still resolve their child elements.
 function refId(el, tag) {
-  const c = el.getElementsByTagNameNS(CIM, tag)[0];
+  const c = el.getElementsByTagNameNS(el.namespaceURI || CIM, tag)[0];
   if (!c) return null;
   const r = c.getAttributeNS(RDF, 'resource');
   return r ? r.replace(/^#/, '') : null;
 }
 function textOf(el, tag) {
-  const c = el.getElementsByTagNameNS(CIM, tag)[0];
+  const c = el.getElementsByTagNameNS(el.namespaceURI || CIM, tag)[0];
   return c ? c.textContent.trim() : null;
 }
 function attrId(el) {
@@ -319,16 +373,29 @@ function parseCim(xmlText) {
   const locations = new Map();     // id -> {id, points: [{seq,x,y}]}
   const ptEnds = new Map();        // id -> {id,name,txId,terminalId,endNumber,ratedU,baseVoltage}
   const allTop = [];               // every top-level CIM object (for class validation)
+  const diagObjOf = new Map();     // DiagramObject id -> the IdentifiedObject id it positions
+  const diagPtsByDO = new Map();   // DiagramObject id -> [{seq,x,y}] (raw, in the diagram CRS)
+  let diagramEpsg = null;          // EPSG code of the cim:Diagram coordinate system, if any
 
-  // "Equipment" = anything with a PowerSystemResource.Location (discovered dynamically).
-  const SKIP_TAGS = new Set([
-    'Terminal','ConnectivityNode','Location','PositionPoint','CoordinateSystem'
+  // Equipment used to be defined as "anything with a PowerSystemResource.Location",
+  // but some exports carry no Location at all (their geometry is in cim:DiagramObject)
+  // and the relationship view needs every conducting component regardless of geometry.
+  // So equipment = any top-level CIM object that ISN'T one of these known non-component
+  // classes: connectivity primitives, geometry/diagram, and container/context classes.
+  const NON_EQUIPMENT = new Set([
+    'Terminal','ConnectivityNode','PowerTransformerEnd',
+    'Location','PositionPoint','CoordinateSystem',
+    'Diagram','DiagramObject','DiagramObjectPoint',
+    'GeographicalRegion','SubGeographicalRegion','Substation',
+    'VoltageLevel','Bay','BaseVoltage','Line','Feeder','EquipmentContainer',
   ]);
   // Pure geometry/structural tags that are never user-facing "components".
-  const GEOMETRY_TAGS = new Set(['Location','PositionPoint','CoordinateSystem']);
+  const GEOMETRY_TAGS = new Set([
+    'Location','PositionPoint','CoordinateSystem','Diagram','DiagramObject','DiagramObjectPoint'
+  ]);
 
   for (const el of Array.from(root.children)) {
-    if (el.namespaceURI !== CIM) continue;
+    if (el.namespaceURI !== cimNamespace) continue;
     const tag = el.localName;
     const id = attrId(el);
     if (!id) continue;
@@ -337,18 +404,7 @@ function parseCim(xmlText) {
       allTop.push({ id, name: textOf(el, 'IdentifiedObject.name') || id, type: tag, xml: el });
     }
 
-    const hasLoc = el.getElementsByTagNameNS(CIM, 'PowerSystemResource.Location').length > 0;
-
-    if (!SKIP_TAGS.has(tag) && hasLoc) {
-      equipment.set(id, {
-        id,
-        name: textOf(el, 'IdentifiedObject.name') || id,
-        type: tag,
-        locationId: refId(el, 'PowerSystemResource.Location'),
-        baseVoltage: refId(el, 'ConductingEquipment.BaseVoltage'),
-        xml: el,
-      });
-    } else if (tag === 'Terminal') {
+    if (tag === 'Terminal') {
       terminals.set(id, {
         id,
         name: textOf(el, 'IdentifiedObject.name') || id,
@@ -385,8 +441,65 @@ function parseCim(xmlText) {
         x: parseFloat(textOf(el, 'PositionPoint.xPosition')),
         y: parseFloat(textOf(el, 'PositionPoint.yPosition')),
       });
+    } else if (tag === 'Diagram') {
+      // The diagram's coordinate system. Similix names it for its EPSG code, e.g.
+      // id "_CoordinateSystem_EPSG_2193" / name "2193" — pull the code out so we can
+      // reproject its DiagramObjectPoints to lon/lat.
+      const m = (id + ' ' + (textOf(el, 'IdentifiedObject.name') || '')).match(/(\d{4,5})/);
+      if (m) diagramEpsg = parseInt(m[1], 10);
+    } else if (tag === 'DiagramObject') {
+      // Links a Diagram to the IdentifiedObject (equipment/CN) it lays out — the
+      // DiagramObject analogue of PowerSystemResource.Location, but referenced the
+      // other way round (the object is named by the DiagramObject, not vice versa).
+      diagObjOf.set(id, refId(el, 'DiagramObject.IdentifiedObject'));
+    } else if (tag === 'DiagramObjectPoint') {
+      const doId = refId(el, 'DiagramObjectPoint.DiagramObject');
+      if (!doId) continue;
+      if (!diagPtsByDO.has(doId)) diagPtsByDO.set(doId, []);
+      diagPtsByDO.get(doId).push({
+        seq: parseInt(textOf(el, 'DiagramObjectPoint.sequenceNumber') || '0', 10),
+        x: parseFloat(textOf(el, 'DiagramObjectPoint.xPosition')),
+        y: parseFloat(textOf(el, 'DiagramObjectPoint.yPosition')),
+      });
+    } else if (!NON_EQUIPMENT.has(tag)) {
+      // Default: a network component. May or may not have a Location.
+      equipment.set(id, {
+        id,
+        name: textOf(el, 'IdentifiedObject.name') || id,
+        type: canonType(tag),
+        locationId: refId(el, 'PowerSystemResource.Location'),
+        baseVoltage: refId(el, 'ConductingEquipment.BaseVoltage'),
+        xml: el,
+      });
     }
   }
+
+  // Fold DiagramObject coordinates into `locations` for any equipment lacking a real
+  // Location. We reproject the diagram CRS (e.g. EPSG:2193 metres) to WGS84 lon/lat so
+  // the geographic renderer can place them unchanged. Synthetic location ids are keyed
+  // by the equipment id (with a prefix) so they're deterministic across a multi-file
+  // merge. If reprojection isn't possible the equipment stays position-less and shows
+  // only in the relationship view.
+  if (diagObjOf.size) {
+    const diagPtsByObj = new Map();   // IdentifiedObject id -> raw points
+    for (const [doId, objId] of diagObjOf) {
+      const pts = diagPtsByDO.get(doId);
+      if (objId && pts && pts.length) diagPtsByObj.set(objId, pts);
+    }
+    for (const eq of equipment.values()) {
+      const real = eq.locationId && locations.has(eq.locationId)
+                   && locations.get(eq.locationId).points.length;
+      if (real) continue;
+      const raw = diagPtsByObj.get(eq.id);
+      if (!raw || !raw.length) continue;
+      const pts = reprojectPoints(raw.slice().sort((a,b) => a.seq - b.seq), diagramEpsg);
+      if (!pts) continue;                       // unknown CRS / proj4 missing
+      const key = 'DIAG::' + eq.id;
+      locations.set(key, { id: key, points: pts, fromDiagram: true });
+      eq.locationId = key;
+    }
+  }
+
   // sort position points
   for (const loc of locations.values()) loc.points.sort((a,b) => a.seq - b.seq);
 
@@ -426,6 +539,29 @@ const STYLE = {
 };
 
 function styleFor(type) { return STYLE[type] || STYLE.default; }
+
+// Show/hide the "no geographic data" overlay on the map. Lives inside #map, so it's
+// hidden automatically when the map is (i.e. in the relationship view). Clicking the
+// button switches to the relationship view.
+function showNoGeoNotice(show) {
+  const mapDiv = document.getElementById('map');
+  let box = document.getElementById('no-geo-msg');
+  if (!show) { if (box) box.remove(); return; }
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'no-geo-msg';
+    box.innerHTML =
+      '<b>No geographic coordinates in this file.</b><br>'
+      + 'It has no usable Location or diagram coordinates, so nothing can be placed on '
+      + 'the map — but the network is fully explorable in the relationship view.'
+      + '<br><button type="button" id="no-geo-switch">Switch to Relationship view</button>';
+    mapDiv.appendChild(box);
+    box.querySelector('#no-geo-switch').addEventListener('click', () => {
+      const radio = document.querySelector('input[name="viewmode"][value="rel"]');
+      if (radio) { radio.checked = true; setView('rel'); }
+    });
+  }
+}
 
 // ---------- CIM class validation ----------
 // Abstract / "umbrella" CIM classes that must NOT appear as concrete instances.
@@ -663,6 +799,12 @@ function render(m) {
   }
 
   if (bounds.length) map.fitBounds(bounds, { padding: [30,30] });
+
+  // No-geographic-data notice: a file can have a full network but no usable
+  // coordinates (no Location/PositionPoint and no reprojectable DiagramObject). Such
+  // a model draws nothing on the map but is fully explorable in the relationship view,
+  // so tell the user where to look instead of leaving a blank map.
+  showNoGeoNotice(!bounds.length && m.equipment.size > 0);
 
   // Type list (dynamic)
   const typeCounts = new Map();
@@ -1040,7 +1182,7 @@ function renderSelectionPanel(descriptor) {
   const rows = [];
   if (obj.xml) {
     for (const c of Array.from(obj.xml.children)) {
-      if (c.namespaceURI !== CIM) continue;
+      if (c.namespaceURI !== obj.xml.namespaceURI) continue;
       const tag = c.localName;
       const resource = c.getAttributeNS(RDF, 'resource');
       const value = resource ? resource.replace(/^#/, '') : (c.textContent || '').trim();
@@ -1180,6 +1322,7 @@ function refreshAll(errors) {
   if (!model) {
     // Empty state: clear both views, reset selection, zero the counts.
     Object.values(layers).forEach(l => l.clearLayers());
+    showNoGeoNotice(false);
     selectedLayer = null; selectedOrigStyle = null; selectedDescriptor = null;
     graphState = null;
     if (simulation) { simulation.stop(); simulation = null; }
