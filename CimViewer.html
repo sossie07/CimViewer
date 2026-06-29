@@ -150,6 +150,9 @@
       <div id="loaded-files" style="font-size:12px; margin-top:3px;"></div>
     </div>
 
+    <h3>Format</h3>
+    <div id="format-info" style="font-size:12px;">No file loaded.</div>
+
     <h3>Search</h3>
     <div id="search-box">
       <input id="search-input" type="text" placeholder="Search name or id…" autocomplete="off">
@@ -342,6 +345,24 @@ const TYPE_ALIASES = {
 };
 function canonType(tag) { return TYPE_ALIASES[tag] || tag; }
 
+// CIM versions we've explicitly handled/tested. An unrecognised version still loads
+// (the parser is namespace-agnostic), but is flagged so the user knows the render is
+// best-effort and class-specific styling/validation may not fully apply.
+const KNOWN_CIM_VERSIONS = new Set(['14','15','16','17','100']);
+
+// Build the format descriptor shown in the "Format" panel for one parsed file.
+function formatOf(parsed) {
+  const v = parsed.cimVersion;
+  return {
+    serialization: 'RDF/XML',
+    cimNamespace: parsed.cimNamespace,
+    cimVersion: v,
+    recognized: !!v && KNOWN_CIM_VERSIONS.has(v),
+    layout: parsed.layout || 'none',
+    crs: parsed.diagramEpsg ? ('EPSG:' + parsed.diagramEpsg) : null,
+  };
+}
+
 // el is always a cim element, so its own namespaceURI is the file's cim namespace —
 // use it rather than a hardcoded constant so files declaring an older/different CIM
 // namespace (e.g. CIM-schema-cim16) still resolve their child elements.
@@ -359,12 +380,29 @@ function attrId(el) {
   return el.getAttributeNS(RDF, 'ID') || el.getAttributeNS(RDF, 'about');
 }
 
+// Determine the CIM namespace a document actually uses. RDF/XML files usually declare
+// it as xmlns:cim, but the prefix can vary or be missing — so we tally the namespaces
+// of the root's element children and take the most common non-RDF one (the CIM data
+// namespace). Falls back to the declared xmlns:cim, then the CIM100 default. Deriving
+// it from the data (not the attribute) is what lets odd/novel exports still load.
+function detectCimNamespace(root) {
+  const counts = new Map();
+  for (const el of Array.from(root.children)) {
+    const ns = el.namespaceURI;
+    if (!ns || ns === RDF) continue;
+    counts.set(ns, (counts.get(ns) || 0) + 1);
+  }
+  let best = null, bestN = 0;
+  for (const [ns, n] of counts) if (n > bestN) { best = ns; bestN = n; }
+  return best || root.getAttribute('xmlns:cim') || CIM;
+}
+
 function parseCim(xmlText) {
   const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
   const root = doc.documentElement;
 
-  // Detect the CIM namespace/version actually declared in the file (display only).
-  const cimNamespace = root.getAttribute('xmlns:cim') || CIM;
+  // Detect the CIM namespace/version actually used by the file.
+  const cimNamespace = detectCimNamespace(root);
   const cimVersion = (cimNamespace.match(/CIM[_]?([0-9]+)/i) || [, ''])[1];
 
   const equipment = new Map();     // id -> {id,name,type,locationId}
@@ -520,8 +558,18 @@ function parseCim(xmlText) {
     termsByCN.get(t.cnId).push(t);
   }
 
+  // Classify how this file expresses geometry, for the format readout.
+  let hasReal = false, hasDiagram = false;
+  for (const loc of locations.values()) {
+    if (!loc.points.length) continue;
+    if (loc.fromDiagram) hasDiagram = true; else hasReal = true;
+  }
+  const layout = hasReal && hasDiagram ? 'mixed'
+               : hasReal ? 'geographic'
+               : hasDiagram ? 'diagram' : 'none';
+
   return { equipment, terminals, cns, locations, ptEnds, termsByEq, termsByCN,
-           allTop, cimNamespace, cimVersion };
+           allTop, cimNamespace, cimVersion, diagramEpsg, layout };
 }
 
 // ---------- Rendering ----------
@@ -1318,6 +1366,7 @@ document.getElementById('files-clear-all').addEventListener('click', () => {
 function refreshAll(errors) {
   rebuildModel();
   renderLoadedFiles();
+  renderFormatInfo();
 
   if (!model) {
     // Empty state: clear both views, reset selection, zero the counts.
@@ -1374,6 +1423,56 @@ function renderLoadedFiles() {
     btn.onclick = () => { loadedFiles = loadedFiles.filter(x => x !== lf); refreshAll(); };
     row.appendChild(span); row.appendChild(btn);
     box.appendChild(row);
+  }
+}
+
+// "Format" panel: per-file CIM version/namespace, serialization, recognized state and
+// geometry layout. Surfaces what each loaded file actually is, and warns when a version
+// loaded best-effort.
+function renderFormatInfo() {
+  const box = document.getElementById('format-info');
+  box.innerHTML = '';
+  if (!loadedFiles.length) { box.textContent = 'No file loaded.'; return; }
+
+  const LAYOUT_LABELS = {
+    geographic: 'geographic (Location lat/lon)',
+    diagram:    'diagram coordinates',
+    mixed:      'mixed (Location + diagram)',
+    none:       'no coordinates — relationship view only',
+  };
+  let anyUnrecognized = false;
+
+  for (const { name, parsed } of loadedFiles) {
+    const f = formatOf(parsed);
+    if (!f.recognized) anyUnrecognized = true;
+
+    const card = document.createElement('div');
+    card.style.cssText = 'margin:0 0 8px; padding:6px 8px; background:#fff; '
+                       + 'border:1px solid #ddd; border-radius:4px;';
+    const verLabel = f.cimVersion ? ('CIM' + f.cimVersion) : 'unknown CIM version';
+    const badge = f.recognized
+      ? '<span style="color:#2e7d32; font-weight:600;">recognized</span>'
+      : '<span class="warn">unrecognized — best-effort</span>';
+    let layoutLabel = LAYOUT_LABELS[f.layout] || f.layout;
+    if (f.layout === 'diagram' && f.crs) layoutLabel += ` (${f.crs}→WGS84)`;
+
+    card.innerHTML =
+      (loadedFiles.length > 1
+        ? `<div style="font-weight:600; overflow:hidden; text-overflow:ellipsis; `
+          + `white-space:nowrap;" title="${name}">${name}</div>` : '')
+      + `<div><b>${verLabel}</b> · ${f.serialization} · ${badge}</div>`
+      + `<div style="color:#555;">Layout: ${layoutLabel}</div>`
+      + `<div style="color:#777; word-break:break-all; font-size:11px;">${f.cimNamespace}</div>`;
+    box.appendChild(card);
+  }
+
+  if (anyUnrecognized) {
+    const w = document.createElement('div');
+    w.className = 'warn';
+    w.style.cssText = 'font-size:11px; margin-top:2px;';
+    w.textContent = '⚠ Unrecognized CIM version loaded best-effort — class-specific '
+                  + 'styling and validation may not fully apply.';
+    box.appendChild(w);
   }
 }
 
