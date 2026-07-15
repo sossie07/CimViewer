@@ -96,6 +96,8 @@
   table.attrs th, table.attrs td { border: 1px solid #ddd; padding: 3px 4px; vertical-align: top;
                                    word-break: break-all; }
   table.attrs th { background: #eef1f5; text-align: left; width: 40%; font-weight: 600; }
+  table.attrs th.attr-section { background: #dbe4f0; text-align: left; width: auto;
+    border-top: 2px solid #b9c6d8; }
   table.attrs td { cursor: pointer; background: #fafbfc; }
   table.attrs td:hover { background: #fff3bf; }
   table.attrs td.copied { background: #c8e6c9 !important; }
@@ -324,8 +326,27 @@ function rebuildModel() {
     if (t.cnId) { if (!termsByCN.has(t.cnId)) termsByCN.set(t.cnId, []); termsByCN.get(t.cnId).push(t); }
   }
   for (const arr of termsByEq.values()) arr.sort((a,b) => a.seq - b.seq);
+  // Union the per-file inverse reference indexes, deduped on (referrer, property):
+  // boundary objects re-exported into several files carry identical references.
+  const inboundRefs = new Map();
+  for (const { parsed } of loadedFiles) {
+    for (const [target, entries] of (parsed.inboundRefs || new Map())) {
+      if (!inboundRefs.has(target)) inboundRefs.set(target, new Map());
+      const m = inboundRefs.get(target);
+      for (const e of entries) {
+        const k = e.fromId + '|' + e.prop;
+        if (!m.has(k)) m.set(k, e);
+      }
+    }
+  }
+  for (const [target, m] of inboundRefs) inboundRefs.set(target, [...m.values()]);
+  // id -> {type,name,...} over every retained top-level object, for resolving
+  // outbound rdf:resource references to something human-readable.
+  const byId = new Map();
+  for (const o of allTop) byId.set(o.id, o);
   model = {
     equipment, terminals, cns, locations, ptEnds, termsByEq, termsByCN, allTop,
+    inboundRefs, byId,
     cimNamespace: loadedFiles[0].parsed.cimNamespace,
     cimVersion:   loadedFiles[0].parsed.cimVersion,
   };
@@ -543,6 +564,28 @@ function parseCim(xmlText) {
     }
   }
 
+  // Inverse reference index for the selection panel's "Referenced by" section:
+  // target id -> the top-level objects whose children point at it (cim:Name alias
+  // records, PowerTransformerEnds, UsagePoints, ...). One pass at parse time so
+  // showing a selection is a map lookup, never a document scan. Geometry classes
+  // and Terminals are skipped — those already surface as derived panel rows.
+  const inboundRefs = new Map();
+  for (const el of Array.from(root.children)) {
+    if (el.namespaceURI !== cimNamespace) continue;
+    const fromTag = el.localName;
+    if (GEOMETRY_TAGS.has(fromTag) || fromTag === 'Terminal') continue;
+    const fromId = attrId(el);
+    if (!fromId) continue;
+    for (const c of Array.from(el.children)) {
+      if (c.namespaceURI !== cimNamespace) continue;
+      const r = c.getAttributeNS(RDF, 'resource');
+      if (!r) continue;
+      const target = r.replace(/^#/, '');
+      if (!inboundRefs.has(target)) inboundRefs.set(target, []);
+      inboundRefs.get(target).push({ fromId, fromTag, prop: c.localName, el });
+    }
+  }
+
   // sort position points
   for (const loc of locations.values()) loc.points.sort((a,b) => a.seq - b.seq);
 
@@ -574,7 +617,7 @@ function parseCim(xmlText) {
                : hasDiagram ? 'diagram' : 'none';
 
   return { equipment, terminals, cns, locations, ptEnds, termsByEq, termsByCN,
-           allTop, cimNamespace, cimVersion, diagramEpsg, layout };
+           allTop, inboundRefs, cimNamespace, cimVersion, diagramEpsg, layout };
 }
 
 // ---------- Rendering ----------
@@ -1223,31 +1266,36 @@ function selectLayer(layer, descriptor) {
   renderSelectionPanel(descriptor);
 }
 
-// descriptor: { kind: 'equipment'|'terminal'|'cn', obj }
-function renderSelectionPanel(descriptor) {
-  const title = document.getElementById('sel-title');
-  const sub   = document.getElementById('sel-sub');
-  const tbody = document.querySelector('#sel-attrs tbody');
-  const rel   = document.getElementById('sel-related');
-  tbody.innerHTML = ''; rel.innerHTML = '';
-
+// Build the full attribute row set for a selected object: its own cim:* children
+// (outbound rdf:resource refs resolved to "Type: name (id)" via model.byId), the
+// derived context rows, provenance, then a "Referenced by" section listing every
+// record that points at this object (cim:Name aliases, PowerTransformerEnds,
+// UsagePoints, ...) with that record's own scalar attributes inlined. All map
+// lookups — no document scans — so cost is proportional to one object's data.
+// Row shape: [label, value, rowKind] with rowKind text|ref|derived|section|inbound.
+function buildAttributeRows(descriptor) {
   const { kind, obj } = descriptor;
-  const typeLabel = kind === 'equipment' ? obj.type
-                  : kind === 'terminal'  ? 'Terminal'
-                  : kind === 'pte'       ? 'PowerTransformerEnd'
-                  : 'ConnectivityNode';
-  title.textContent = `${typeLabel}: ${obj.name || obj.id}`;
-  sub.textContent = `id: ${obj.id}`;
+  const rows = [];
+
+  // "#400" -> 'BaseVoltage: 400V (400)' when the target is a known object.
+  const resolve = (rid) => {
+    const t = model.byId.get(rid);
+    if (!t) return null;
+    return (t.name && t.name !== rid) ? `${t.type}: ${t.name} (${rid})` : `${t.type}: ${rid}`;
+  };
 
   // Dump all child cim:* elements as attribute rows
-  const rows = [];
   if (obj.xml) {
     for (const c of Array.from(obj.xml.children)) {
       if (c.namespaceURI !== obj.xml.namespaceURI) continue;
       const tag = c.localName;
       const resource = c.getAttributeNS(RDF, 'resource');
-      const value = resource ? resource.replace(/^#/, '') : (c.textContent || '').trim();
-      rows.push([tag, value, resource ? 'ref' : 'text']);
+      if (resource) {
+        const rid = resource.replace(/^#/, '');
+        rows.push([tag, resolve(rid) || rid, 'ref']);
+      } else {
+        rows.push([tag, (c.textContent || '').trim(), 'text']);
+      }
     }
   }
   // Derived / computed extras
@@ -1296,7 +1344,61 @@ function renderSelectionPanel(descriptor) {
     rows.push(['(derived) source file(s)', [...obj.sources].join(', '), 'derived']);
   }
 
-  for (const [k, v, kind2] of rows) {
+  // Inbound records: everything in the model that references this object. Each row
+  // inlines the referencing record's scalar attributes (skipping mRID and the
+  // back-reference to the selected object itself).
+  const inbound = (model.inboundRefs && model.inboundRefs.get(obj.id)) || [];
+  if (inbound.length) {
+    rows.push(['Referenced by', `${inbound.length} record${inbound.length > 1 ? 's' : ''}`, 'section']);
+    for (const r of inbound) {
+      const parts = [];
+      for (const c of Array.from(r.el.children)) {
+        if (c.namespaceURI !== r.el.namespaceURI) continue;
+        const p = c.localName.split('.').pop();
+        if (p === 'mRID') continue;
+        const res = c.getAttributeNS(RDF, 'resource');
+        if (res) {
+          const rid = res.replace(/^#/, '');
+          if (rid === obj.id) continue;
+          const t = model.byId.get(rid);
+          parts.push(`${p}=${t && t.name && t.name !== rid ? t.name : rid}`);
+        } else {
+          const v = (c.textContent || '').trim();
+          if (v) parts.push(`${p}=${v}`);
+        }
+      }
+      rows.push([r.fromTag, parts.join(', ') || r.fromId, 'inbound']);
+    }
+  }
+
+  return rows;
+}
+
+// descriptor: { kind: 'equipment'|'terminal'|'cn'|'pte', obj }
+function renderSelectionPanel(descriptor) {
+  const title = document.getElementById('sel-title');
+  const sub   = document.getElementById('sel-sub');
+  const tbody = document.querySelector('#sel-attrs tbody');
+  const rel   = document.getElementById('sel-related');
+  tbody.innerHTML = ''; rel.innerHTML = '';
+
+  const { kind, obj } = descriptor;
+  const typeLabel = kind === 'equipment' ? obj.type
+                  : kind === 'terminal'  ? 'Terminal'
+                  : kind === 'pte'       ? 'PowerTransformerEnd'
+                  : 'ConnectivityNode';
+  title.textContent = `${typeLabel}: ${obj.name || obj.id}`;
+  sub.textContent = `id: ${obj.id}`;
+
+  for (const [k, v, kind2] of buildAttributeRows(descriptor)) {
+    if (kind2 === 'section') {
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.colSpan = 2; th.className = 'attr-section';
+      th.textContent = `${k} (${v})`;
+      tr.appendChild(th); tbody.appendChild(tr);
+      continue;
+    }
     const tr = document.createElement('tr');
     const th = document.createElement('th'); th.textContent = k;
     const td = document.createElement('td'); td.textContent = v;
