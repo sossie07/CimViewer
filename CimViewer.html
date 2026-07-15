@@ -202,6 +202,7 @@
     <label class="row"><input type="checkbox" id="val-acl3"> <span class="warn">Highlight AcLineSegments with ≠2 terminals</span> <span class="badge" id="c-acl3">0</span></label>
     <label class="row"><input type="checkbox" id="val-orphan-term"> Terminals missing a ConnectivityNode <span class="badge" id="c-orphan">0</span></label>
     <label class="row"><input type="checkbox" id="val-no-loc"> Equipment missing a Location <span class="badge" id="c-noloc">0</span></label>
+    <label class="row"><input type="checkbox" id="val-coloc"> <span class="warn">Co-located equipment not sharing a ConnectivityNode</span> <span class="badge" id="c-coloc">0</span></label>
     <label class="row"><input type="checkbox" id="val-abstract"> <span class="warn">Disallowed / abstract CIM classes (e.g. Switch)</span> <span class="badge" id="c-abstract">0</span></label>
     <label class="row"><input type="checkbox" id="val-dupid"> <span class="warn">Duplicate rdf:ID values (per file)</span> <span class="badge" id="c-dupid">0</span></label>
     <label class="row"><input type="checkbox" id="val-xfile"> <span class="warn">Cross-file rdf:ID collisions (different object, same id)</span> <span class="badge" id="c-xfile">0</span></label>
@@ -212,6 +213,7 @@
     <div id="dup-issues" style="font-size:12px; margin-top:6px;"></div>
     <div id="xfile-issues" style="font-size:12px; margin-top:6px;"></div>
     <div id="noloc-issues" style="font-size:12px; margin-top:6px;"></div>
+    <div id="coloc-issues" style="font-size:12px; margin-top:6px;"></div>
   </div>
   <div id="resizer" title="Drag to resize"></div>
   <div id="viewport">
@@ -268,6 +270,16 @@ document.getElementById('splash-close').addEventListener('click', () => {
 // maxZoom 24 lets you keep zooming past the basemap to inspect closely-spaced
 // components; the OSM background just disappears beyond the tile layer's maxZoom.
 const map = L.map('map', { maxZoom: 24 }).setView([-43.63, 172.65], 13);
+// Leaflet ends a zoom animation on a CSS transitionend event from the map pane. If
+// that event never arrives — map hidden mid-animation (world toggle), backgrounded
+// tab, headless browser — _animatingZoom wedges true and _tryAnimatedZoom then
+// short-circuits EVERY later setView/setZoom/wheel-zoom into a silent no-op.
+// Watchdog: force-complete via Leaflet's own (flag-guarded, idempotent)
+// _onZoomTransitionEnd if the animation runs well past the ~0.25s transition.
+map.on('zoomanim', () => {
+  clearTimeout(map._zoomAnimWatchdog);
+  map._zoomAnimWatchdog = setTimeout(() => map._onZoomTransitionEnd(), 500);
+});
 const tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   // maxNativeZoom 19 = OSM's deepest real tiles; 20 upscales them, beyond that no background.
   maxZoom: 20, maxNativeZoom: 19, attribution: '&copy; OpenStreetMap'
@@ -759,6 +771,69 @@ function getNoLocationEquipment() {
         || !model.locations.get(e.locationId).points.length));
 }
 
+// "Co-located but not connected": conducting equipment whose PositionPoints land on
+// the same spot without any ConnectivityNode joining them at that spot — e.g. a fuse
+// drawn at an AcLineSegment end but electrically dangling. Coordinates are quantized
+// to 1e-7° (~1 cm) so float formatting jitter still matches, while distinct poles
+// (metres apart) never merge. Within a bucket, members are grouped by union-find over
+// shared CN ids, so chains (fuse—busbar—line) count as one connected group; a bucket
+// with 2+ groups is one issue. Only equipment with terminals participates — anything
+// else can't share a CN by construction and would always false-positive.
+const COLOC_DECIMALS = 7;
+function getColocatedDisconnected() {
+  if (!model) return [];
+  const buckets = new Map();   // "x,y" -> Map(eqId -> {eq, end})
+  for (const eq of model.equipment.values()) {
+    if (!model.termsByEq.has(eq.id)) continue;
+    const loc = model.locations.get(eq.locationId);
+    if (!loc || !loc.points.length) continue;
+    const last = loc.points.length - 1;
+    loc.points.forEach((p, i) => {
+      const key = p.x.toFixed(COLOC_DECIMALS) + ',' + p.y.toFixed(COLOC_DECIMALS);
+      // `end` distinguishes a line's endpoints from mid-span vertices in the report —
+      // an unconnected device at a mid-vertex often means the line was never split.
+      const end = last <= 1 || i === 0 || i === last;
+      if (!buckets.has(key)) buckets.set(key, new Map());
+      const m = buckets.get(key);
+      if (!m.has(eq.id)) m.set(eq.id, { eq, end });
+      else if (end) m.get(eq.id).end = true;
+    });
+  }
+  const issues = [];
+  for (const [key, members] of buckets) {
+    if (members.size < 2) continue;
+    // Union-find over shared ConnectivityNode ids among this bucket's members.
+    const parent = new Map();
+    const find = (x) => {
+      while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); }
+      return x;
+    };
+    const seenCN = new Map();   // cnId -> first member id carrying it
+    for (const id of members.keys()) {
+      parent.set(id, id);
+      for (const t of (model.termsByEq.get(id) || [])) {
+        if (!t.cnId) continue;
+        if (seenCN.has(t.cnId)) {
+          const ra = find(id), rb = find(seenCN.get(t.cnId));
+          if (ra !== rb) parent.set(ra, rb);
+        } else seenCN.set(t.cnId, id);
+      }
+    }
+    const groupsByRoot = new Map();
+    for (const [id, m] of members) {
+      const r = find(id);
+      if (!groupsByRoot.has(r)) groupsByRoot.set(r, []);
+      groupsByRoot.get(r).push(m);
+    }
+    if (groupsByRoot.size > 1) {
+      const [x, y] = key.split(',').map(Number);
+      const groups = [...groupsByRoot.values()].sort((a, b) => b.length - a.length);
+      issues.push({ key, lon: x, lat: y, groups });
+    }
+  }
+  return issues;
+}
+
 // Centroid of a location (first point or average for line)
 function locCenter(loc) {
   if (!loc || !loc.points.length) return null;
@@ -946,6 +1021,7 @@ function render(m) {
   document.getElementById('c-abstract').textContent = getDisallowedClassInstances().length;
   document.getElementById('c-dupid').textContent = getDuplicateIds().length;
   document.getElementById('c-xfile').textContent = getCrossFileCollisions().length;
+  document.getElementById('c-coloc').textContent = getColocatedDisconnected().length;
 
   // issues panel
   const issues = document.getElementById('issues');
@@ -995,6 +1071,7 @@ function render(m) {
   renderDuplicateIssues();
   renderCollisionIssues();
   renderNoLocationIssues();
+  renderColocatedIssues();
   applyLayerToggles();
 }
 
@@ -1152,6 +1229,59 @@ function renderNoLocationIssues() {
     // Location-less equipment can't be shown on the map, so zoom takes us to the
     // relationship view where it exists as a node.
     btn.onclick = () => zoomToNoLocation(eq);
+    div.appendChild(btn);
+    box.appendChild(div);
+  }
+}
+
+// Render the "co-located but not connected" list. Gated on its checkbox; the badge
+// is always kept current in render(). While enabled, every flagged spot also gets a
+// dashed amber ring on the map (validationOverlay layer) so the cluster is visible
+// in place; the zoom button pans the geographic view to the exact coordinate.
+function renderColocatedIssues() {
+  const box = document.getElementById('coloc-issues');
+  box.innerHTML = '';
+  layers.validationOverlay.clearLayers();
+  if (!model || !document.getElementById('val-coloc').checked) return;
+
+  const issues = getColocatedDisconnected();
+  if (!issues.length) {
+    box.innerHTML = '<div style="color:#2e7d32;">No co-located disconnected equipment.</div>';
+    return;
+  }
+  const h = document.createElement('div');
+  h.innerHTML = `<b class="warn">Co-located but not connected (${issues.length} location${issues.length > 1 ? 's' : ''})</b> `
+              + `<span style="color:#777;">— equipment at the same point with no shared ConnectivityNode; groups shown { } ⇄ { }</span>`;
+  box.appendChild(h);
+
+  for (const iss of issues) {
+    L.circleMarker([iss.lat, iss.lon], {
+      radius: 14, color: '#e65100', weight: 3, fill: false, dashArray: '4 3',
+    }).addTo(layers.validationOverlay);
+
+    const div = document.createElement('div');
+    div.style.margin = '2px 0 8px';
+    const groupHtml = iss.groups.map(g =>
+      '{ ' + g.map(m =>
+        `<b class="warn">${m.eq.type}</b> <code>${m.eq.name || m.eq.id}</code>`
+        + (m.end ? '' : ' <span style="color:#777;">(mid-span)</span>')
+      ).join(', ') + ' }'
+    ).join(' ⇄ ');
+    div.innerHTML = `• ${groupHtml}`;
+    const btn = document.createElement('button');
+    btn.textContent = 'zoom';
+    btn.style.marginLeft = '6px';
+    btn.onclick = () => {
+      if (currentView !== 'geo') {
+        const radio = document.querySelector('input[name="viewmode"][value="geo"]');
+        if (radio) radio.checked = true;
+        setView('geo');
+      }
+      // A still-running (or wedged — see the zoomanim watchdog) zoom animation makes
+      // setView a silent no-op; finish it first so this click always lands.
+      if (map._animatingZoom) map._onZoomTransitionEnd();
+      map.setView([iss.lat, iss.lon], Math.max(map.getZoom(), 21));
+    };
     div.appendChild(btn);
     box.appendChild(div);
   }
@@ -1441,6 +1571,7 @@ document.getElementById('val-no-loc').addEventListener('change', () => {
   renderNoLocationIssues();
   applyLayerTogglesGraph();   // refresh the relationship-view highlight
 });
+document.getElementById('val-coloc').addEventListener('change', renderColocatedIssues);
 document.getElementById('lyr-all-on').addEventListener('click', () => {
   document.querySelectorAll('input[data-cim-type]').forEach(cb => cb.checked = true);
   applyLayerToggles();
@@ -1497,10 +1628,11 @@ function refreshAll(errors) {
     document.querySelector('#sel-attrs tbody').innerHTML = '';
     document.getElementById('sel-related').innerHTML = '';
     document.getElementById('type-list').innerHTML = '';
-    ['c-term','c-cn','c-acl3','c-orphan','c-noloc','c-abstract','c-dupid','c-xfile']
+    ['c-term','c-cn','c-acl3','c-orphan','c-noloc','c-abstract','c-dupid','c-xfile','c-coloc']
       .forEach(id => document.getElementById(id).textContent = '0');
-    ['issues','abstract-issues','dup-issues','xfile-issues','noloc-issues']
+    ['issues','abstract-issues','dup-issues','xfile-issues','noloc-issues','coloc-issues']
       .forEach(id => document.getElementById(id).innerHTML = '');
+    layers.validationOverlay.clearLayers();
     document.getElementById('status').textContent =
       (errors && errors.length) ? ('Parse error — ' + errors.join('; ')) : 'No file loaded.';
     return;
