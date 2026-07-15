@@ -507,6 +507,11 @@ function parseCim(xmlText) {
         type: canonType(tag),
         locationId: refId(el, 'PowerSystemResource.Location'),
         baseVoltage: refId(el, 'ConductingEquipment.BaseVoltage'),
+        // Carrying Equipment.* properties proves this is physical equipment even when
+        // its Terminals aren't in the export (e.g. boundary equipment in partial files).
+        hasEquipProps: !!(textOf(el, 'Equipment.inService')
+                       || textOf(el, 'Equipment.normallyInService')
+                       || refId(el, 'Equipment.EquipmentContainer')),
         xml: el,
       });
     }
@@ -696,11 +701,19 @@ function getCrossFileCollisions() {
 // Equipment with no usable Location: either no locationId, an unresolved
 // locationId, or a Location that carries no PositionPoints. Such objects can't be
 // placed on the map — they're only reachable in the relationship view.
+//
+// Only *structural* equipment is flagged: objects a Terminal wires into the network
+// (primary — works for any class name, including vendor extensions) or that carry
+// Equipment.* properties (secondary — catches equipment exported without its
+// terminals). Everything else that falls through the NON_EQUIPMENT blocklist
+// (cim:Name aliases, AssetInfo datasheets like CableInfo, UsagePoints, containers
+// like LvFeeder) isn't physical, so a missing Location is normal, not a warning.
 function getNoLocationEquipment() {
   if (!model) return [];
   return [...model.equipment.values()].filter(e =>
-    !e.locationId || !model.locations.has(e.locationId)
-    || !model.locations.get(e.locationId).points.length);
+    (model.termsByEq.has(e.id) || e.hasEquipProps)
+    && (!e.locationId || !model.locations.has(e.locationId)
+        || !model.locations.get(e.locationId).points.length));
 }
 
 // Centroid of a location (first point or average for line)
