@@ -48,6 +48,10 @@
     filter: drop-shadow(0 0 8px #ffb74d);
   }
   #graph g.node.noloc text { fill: #e65100; font-weight: 700; }
+  /* Context nodes (containers + reference data) read as grouping, not as devices:
+     dashed outline, lighter label. */
+  #graph g.node.kind-context rect { stroke: #555; stroke-dasharray: 3 2; }
+  #graph g.node.kind-context text { fill: #444; font-style: italic; }
   #graph g.node.hidden { display: none; }
   #graph g.node text.hidden { display: none; }
   #mode-box { background:#fff; border:1px solid #bbb; border-radius:4px; padding:6px 8px; margin-top:6px; }
@@ -171,6 +175,15 @@
     </div>
 
     <h3>Layers</h3>
+    <div id="class-scope-box" style="margin-bottom:6px;">
+      <div style="font-size:11px; color:#555;">Classes shown:</div>
+      <label class="row" title="Equipment plus containers (Feeder, LvFeeder, Substation, VoltageLevel, …)">
+        <input type="radio" name="classscope" value="recommended" checked> Recommended
+        <span class="badge" id="c-container">0</span></label>
+      <label class="row" title="Also show reference data — BaseVoltage, WireInfo, UsagePoint, alias records, addresses">
+        <input type="radio" name="classscope" value="all"> All classes
+        <span class="badge" id="c-other">0</span></label>
+    </div>
     <label class="row"><input type="checkbox" id="lyr-terminals"> <span class="legend-dot" style="background:#ff9800"></span>Terminals <span class="badge" id="c-term">0</span></label>
     <label class="row"><input type="checkbox" id="lyr-cn"> <span class="legend-dot" style="background:#00838f"></span>Connectivity Nodes <span class="badge" id="c-cn">0</span></label>
     <div style="margin-top:6px; font-size:11px; color:#555;">Equipment by type:</div>
@@ -320,11 +333,14 @@ function mergeInto(dst, src, name) {
 
 function rebuildModel() {
   if (!loadedFiles.length) { model = null; return; }
-  const equipment = new Map(), terminals = new Map(), cns = new Map(),
+  const equipment = new Map(), context = new Map(), terminals = new Map(), cns = new Map(),
         locations = new Map(), ptEnds = new Map();
   const allTop = [];
+  const extraNamespaces = new Set();
   for (const { name, parsed } of loadedFiles) {
     mergeInto(equipment, parsed.equipment, name);
+    mergeInto(context,   parsed.context || new Map(), name);
+    for (const ns of (parsed.extraNamespaces || [])) extraNamespaces.add(ns);
     mergeInto(terminals, parsed.terminals, name);
     mergeInto(cns,       parsed.cns,       name);
     mergeInto(locations, parsed.locations, name);
@@ -357,8 +373,8 @@ function rebuildModel() {
   const byId = new Map();
   for (const o of allTop) byId.set(o.id, o);
   model = {
-    equipment, terminals, cns, locations, ptEnds, termsByEq, termsByCN, allTop,
-    inboundRefs, byId,
+    equipment, context, terminals, cns, locations, ptEnds, termsByEq, termsByCN, allTop,
+    inboundRefs, byId, extraNamespaces: [...extraNamespaces],
     cimNamespace: loadedFiles[0].parsed.cimNamespace,
     cimVersion:   loadedFiles[0].parsed.cimVersion,
   };
@@ -378,6 +394,16 @@ const TYPE_ALIASES = {
 };
 function canonType(tag) { return TYPE_ALIASES[tag] || tag; }
 
+// Containers group equipment rather than conducting anything, so they own no Terminal
+// and the structural equipment test can't see them. They still describe the network's
+// shape — which feeder a transformer sits on, which substation a feeder leaves from —
+// so they're shown by default alongside equipment. Everything else that isn't
+// equipment (reference data, addresses, alias records) is "other" and shown only when
+// the user asks for all classes.
+const CONTAINER_CLASSES = new Set([
+  'Feeder','LvFeeder','Circuit','Substation','VoltageLevel','Bay','Line','EquipmentContainer',
+]);
+
 // CIM versions we've explicitly handled/tested. An unrecognised version still loads
 // (the parser is namespace-agnostic), but is flagged so the user knows the render is
 // best-effort and class-specific styling/validation may not fully apply.
@@ -393,20 +419,30 @@ function formatOf(parsed) {
     recognized: !!v && KNOWN_CIM_VERSIONS.has(v),
     layout: parsed.layout || 'none',
     crs: parsed.diagramEpsg ? ('EPSG:' + parsed.diagramEpsg) : null,
+    extraNamespaces: parsed.extraNamespaces || [],
   };
 }
 
-// el is always a cim element, so its own namespaceURI is the file's cim namespace —
-// use it rather than a hardcoded constant so files declaring an older/different CIM
-// namespace (e.g. CIM-schema-cim16) still resolve their child elements.
+// Model metadata (md:FullModel and friends) describes the export, not the network, so
+// it must never become a component. Everything else outside RDF is treated as data —
+// that's what lets a vendor extension namespace through (see isDataNamespace).
+const MODEL_DESCRIPTION_NS = '/ModelDescription/';
+function isDataNamespace(ns) {
+  return !!ns && ns !== RDF && ns.indexOf(MODEL_DESCRIPTION_NS) === -1;
+}
+
+// Child properties are matched on local name across ANY namespace. A vendor extension
+// object mixes namespaces freely — a zb:LvFeeder carries cim:IdentifiedObject.name and
+// zb:LvFeeder.Terminal side by side — so scoping the lookup to the parent's own
+// namespace (as this used to) silently loses half of every extension object.
 function refId(el, tag) {
-  const c = el.getElementsByTagNameNS(el.namespaceURI || CIM, tag)[0];
+  const c = el.getElementsByTagNameNS('*', tag)[0];
   if (!c) return null;
   const r = c.getAttributeNS(RDF, 'resource');
   return r ? r.replace(/^#/, '') : null;
 }
 function textOf(el, tag) {
-  const c = el.getElementsByTagNameNS(el.namespaceURI || CIM, tag)[0];
+  const c = el.getElementsByTagNameNS('*', tag)[0];
   return c ? c.textContent.trim() : null;
 }
 function attrId(el) {
@@ -438,35 +474,27 @@ function parseCim(xmlText) {
   const cimNamespace = detectCimNamespace(root);
   const cimVersion = (cimNamespace.match(/CIM[_]?([0-9]+)/i) || [, ''])[1];
 
-  const equipment = new Map();     // id -> {id,name,type,locationId}
+  const equipment = new Map();     // id -> {id,name,type,locationId}  (conducting only)
+  const context = new Map();       // id -> same shape; containers + reference/other data
   const terminals = new Map();     // id -> {id,name,seq,eqId,cnId}
   const cns = new Map();           // id -> {id,name}
   const locations = new Map();     // id -> {id, points: [{seq,x,y}]}
   const ptEnds = new Map();        // id -> {id,name,txId,terminalId,endNumber,ratedU,baseVoltage}
+  const candidates = new Map();    // provisional: partitioned into equipment/context below
   const allTop = [];               // every top-level CIM object (for class validation)
+  const extraNamespaces = new Set();  // non-primary data namespaces seen (vendor extensions)
   const diagObjOf = new Map();     // DiagramObject id -> the IdentifiedObject id it positions
   const diagPtsByDO = new Map();   // DiagramObject id -> [{seq,x,y}] (raw, in the diagram CRS)
   let diagramEpsg = null;          // EPSG code of the cim:Diagram coordinate system, if any
 
-  // Equipment used to be defined as "anything with a PowerSystemResource.Location",
-  // but some exports carry no Location at all (their geometry is in cim:DiagramObject)
-  // and the relationship view needs every conducting component regardless of geometry.
-  // So equipment = any top-level CIM object that ISN'T one of these known non-component
-  // classes: connectivity primitives, geometry/diagram, and container/context classes.
-  const NON_EQUIPMENT = new Set([
-    'Terminal','ConnectivityNode','PowerTransformerEnd',
-    'Location','PositionPoint','CoordinateSystem',
-    'Diagram','DiagramObject','DiagramObjectPoint',
-    'GeographicalRegion','SubGeographicalRegion','Substation',
-    'VoltageLevel','Bay','BaseVoltage','Line','Feeder','EquipmentContainer',
-  ]);
   // Pure geometry/structural tags that are never user-facing "components".
   const GEOMETRY_TAGS = new Set([
     'Location','PositionPoint','CoordinateSystem','Diagram','DiagramObject','DiagramObjectPoint'
   ]);
 
   for (const el of Array.from(root.children)) {
-    if (el.namespaceURI !== cimNamespace) continue;
+    if (!isDataNamespace(el.namespaceURI)) continue;
+    if (el.namespaceURI !== cimNamespace) extraNamespaces.add(el.namespaceURI);
     const tag = el.localName;
     const id = attrId(el);
     if (!id) continue;
@@ -532,9 +560,10 @@ function parseCim(xmlText) {
         x: parseFloat(textOf(el, 'DiagramObjectPoint.xPosition')),
         y: parseFloat(textOf(el, 'DiagramObjectPoint.yPosition')),
       });
-    } else if (!NON_EQUIPMENT.has(tag)) {
-      // Default: a network component. May or may not have a Location.
-      equipment.set(id, {
+    } else if (!GEOMETRY_TAGS.has(tag)) {
+      // Every remaining top-level object. Whether it counts as conducting equipment or
+      // as context is decided below, once the Terminals are all parsed.
+      candidates.set(id, {
         id,
         name: textOf(el, 'IdentifiedObject.name') || id,
         type: canonType(tag),
@@ -547,6 +576,32 @@ function parseCim(xmlText) {
                        || refId(el, 'Equipment.EquipmentContainer')),
         xml: el,
       });
+    }
+  }
+
+  // Which ids are named by a Terminal — the primary "this is real equipment" signal.
+  const termsByEqId = new Set();
+  for (const t of terminals.values()) if (t.eqId) termsByEqId.add(t.eqId);
+
+  // Split candidates into conducting equipment vs context.
+  //
+  // This used to be a blocklist, which was allow-by-default: any class nobody thought
+  // to exclude became "equipment", so Name, StreetAddress, TownDetail, UsagePoint and
+  // WireInfo records were all counted and drawn as network components. Instead, ask the
+  // data: real equipment is referenced by a Terminal, or carries Equipment.* / a
+  // ConductingEquipment.BaseVoltage (the fallbacks that cover boundary equipment whose
+  // Terminals live in another file). Everything else is context.
+  //
+  // CONTAINER_CLASSES is the one thing still named explicitly: containers describe the
+  // network's shape and are worth showing by default, but they own no Terminal so the
+  // structural test alone would bury them with the reference data.
+  for (const [id, o] of candidates) {
+    const conducting = termsByEqId.has(id) || o.hasEquipProps || !!o.baseVoltage;
+    if (conducting && !CONTAINER_CLASSES.has(o.type)) {
+      equipment.set(id, o);
+    } else {
+      o.tier = CONTAINER_CLASSES.has(o.type) ? 'container' : 'other';
+      context.set(id, o);
     }
   }
 
@@ -583,13 +638,13 @@ function parseCim(xmlText) {
   // and Terminals are skipped — those already surface as derived panel rows.
   const inboundRefs = new Map();
   for (const el of Array.from(root.children)) {
-    if (el.namespaceURI !== cimNamespace) continue;
+    if (!isDataNamespace(el.namespaceURI)) continue;
     const fromTag = el.localName;
     if (GEOMETRY_TAGS.has(fromTag) || fromTag === 'Terminal') continue;
     const fromId = attrId(el);
     if (!fromId) continue;
     for (const c of Array.from(el.children)) {
-      if (c.namespaceURI !== cimNamespace) continue;
+      if (!isDataNamespace(c.namespaceURI)) continue;
       const r = c.getAttributeNS(RDF, 'resource');
       if (!r) continue;
       const target = r.replace(/^#/, '');
@@ -628,8 +683,9 @@ function parseCim(xmlText) {
                : hasReal ? 'geographic'
                : hasDiagram ? 'diagram' : 'none';
 
-  return { equipment, terminals, cns, locations, ptEnds, termsByEq, termsByCN,
-           allTop, inboundRefs, cimNamespace, cimVersion, diagramEpsg, layout };
+  return { equipment, context, terminals, cns, locations, ptEnds, termsByEq, termsByCN,
+           allTop, inboundRefs, cimNamespace, cimVersion, diagramEpsg, layout,
+           extraNamespaces: [...extraNamespaces] };
 }
 
 // ---------- Rendering ----------
@@ -985,10 +1041,16 @@ function render(m) {
   // so tell the user where to look instead of leaving a blank map.
   showNoGeoNotice(!bounds.length && m.equipment.size > 0);
 
-  // Type list (dynamic)
+  // Type list (dynamic). Context classes get their own checkbox too, so "show all
+  // classes" still leaves the user able to mute an individually noisy one.
   const typeCounts = new Map();
   for (const eq of m.equipment.values()) {
     typeCounts.set(eq.type, (typeCounts.get(eq.type) || 0) + 1);
+  }
+  const contextTypes = new Map();   // type -> tier ('container' | 'other')
+  for (const c of (m.context ? m.context.values() : [])) {
+    typeCounts.set(c.type, (typeCounts.get(c.type) || 0) + 1);
+    contextTypes.set(c.type, c.tier || 'other');
   }
   const types = [...typeCounts.keys()].sort();
   const typeList = document.getElementById('type-list');
@@ -1003,17 +1065,29 @@ function render(m) {
     const id = 'type-' + type;
     const label = document.createElement('label');
     label.className = 'row';
+    const isCtx = contextTypes.has(type);
+    label.dataset.tier = isCtx ? contextTypes.get(type) : 'equipment';
     label.innerHTML = `<input type="checkbox" data-cim-type="${type}" id="${id}"
                          ${prev[type] !== false ? 'checked' : ''}>
                        <span class="legend-dot" style="background:${color}"></span>
-                       ${type} <span class="badge">${typeCounts.get(type)}</span>`;
+                       <span${isCtx ? ' style="font-style:italic; color:#555;"' : ''}>${type}</span>
+                       <span class="badge">${typeCounts.get(type)}</span>`;
     typeList.appendChild(label);
     label.querySelector('input').addEventListener('change', applyLayerToggles);
   }
+  syncTypeListScope();
 
   // counts
   document.getElementById('c-term').textContent = m.terminals.size;
   document.getElementById('c-cn').textContent = m.cns.size;
+  {
+    let nContainer = 0, nOther = 0;
+    for (const c of (m.context ? m.context.values() : [])) {
+      if (c.tier === 'container') nContainer++; else nOther++;
+    }
+    document.getElementById('c-container').textContent = m.equipment.size + nContainer;
+    document.getElementById('c-other').textContent = m.equipment.size + nContainer + nOther;
+  }
   document.getElementById('c-acl3').textContent = badAcls.length;
   document.getElementById('c-orphan').textContent =
     [...m.terminals.values()].filter(t => !t.cnId).length;
@@ -1417,7 +1491,7 @@ function buildAttributeRows(descriptor) {
   // Dump all child cim:* elements as attribute rows
   if (obj.xml) {
     for (const c of Array.from(obj.xml.children)) {
-      if (c.namespaceURI !== obj.xml.namespaceURI) continue;
+      if (!isDataNamespace(c.namespaceURI)) continue;
       const tag = c.localName;
       const resource = c.getAttributeNS(RDF, 'resource');
       if (resource) {
@@ -1483,7 +1557,7 @@ function buildAttributeRows(descriptor) {
     for (const r of inbound) {
       const parts = [];
       for (const c of Array.from(r.el.children)) {
-        if (c.namespaceURI !== r.el.namespaceURI) continue;
+        if (!isDataNamespace(c.namespaceURI)) continue;
         const p = c.localName.split('.').pop();
         if (p === 'mRID') continue;
         const res = c.getAttributeNS(RDF, 'resource');
@@ -1504,7 +1578,7 @@ function buildAttributeRows(descriptor) {
   return rows;
 }
 
-// descriptor: { kind: 'equipment'|'terminal'|'cn'|'pte', obj }
+// descriptor: { kind: 'equipment'|'context'|'terminal'|'cn'|'pte', obj }
 function renderSelectionPanel(descriptor) {
   const title = document.getElementById('sel-title');
   const sub   = document.getElementById('sel-sub');
@@ -1513,7 +1587,7 @@ function renderSelectionPanel(descriptor) {
   tbody.innerHTML = ''; rel.innerHTML = '';
 
   const { kind, obj } = descriptor;
-  const typeLabel = kind === 'equipment' ? obj.type
+  const typeLabel = (kind === 'equipment' || kind === 'context') ? obj.type
                   : kind === 'terminal'  ? 'Terminal'
                   : kind === 'pte'       ? 'PowerTransformerEnd'
                   : 'ConnectivityNode';
@@ -1572,6 +1646,9 @@ document.getElementById('val-no-loc').addEventListener('change', () => {
   applyLayerTogglesGraph();   // refresh the relationship-view highlight
 });
 document.getElementById('val-coloc').addEventListener('change', renderColocatedIssues);
+document.querySelectorAll('input[name="classscope"]').forEach(r => {
+  r.addEventListener('change', () => { syncTypeListScope(); applyLayerTogglesGraph(); });
+});
 document.getElementById('lyr-all-on').addEventListener('click', () => {
   document.querySelectorAll('input[data-cim-type]').forEach(cb => cb.checked = true);
   applyLayerToggles();
@@ -1628,7 +1705,7 @@ function refreshAll(errors) {
     document.querySelector('#sel-attrs tbody').innerHTML = '';
     document.getElementById('sel-related').innerHTML = '';
     document.getElementById('type-list').innerHTML = '';
-    ['c-term','c-cn','c-acl3','c-orphan','c-noloc','c-abstract','c-dupid','c-xfile','c-coloc']
+    ['c-term','c-cn','c-container','c-other','c-acl3','c-orphan','c-noloc','c-abstract','c-dupid','c-xfile','c-coloc']
       .forEach(id => document.getElementById(id).textContent = '0');
     ['issues','abstract-issues','dup-issues','xfile-issues','noloc-issues','coloc-issues']
       .forEach(id => document.getElementById(id).innerHTML = '');
@@ -1640,7 +1717,8 @@ function refreshAll(errors) {
 
   const fileWord = loadedFiles.length === 1 ? 'file' : 'files';
   let status = `${loadedFiles.length} ${fileWord}: ${model.equipment.size} equipment, `
-             + `${model.terminals.size} terminals, ${model.cns.size} CNs.`;
+             + `${model.terminals.size} terminals, ${model.cns.size} CNs`
+             + (model.context && model.context.size ? `, ${model.context.size} other classes.` : '.');
   if (errors && errors.length) status += `  ⚠ ${errors.length} failed: ${errors.join('; ')}`;
   document.getElementById('status').textContent = status;
 
@@ -1709,7 +1787,12 @@ function renderFormatInfo() {
           + `white-space:nowrap;" title="${name}">${name}</div>` : '')
       + `<div><b>${verLabel}</b> · ${f.serialization} · ${badge}</div>`
       + `<div style="color:#555;">Layout: ${layoutLabel}</div>`
-      + `<div style="color:#777; word-break:break-all; font-size:11px;">${f.cimNamespace}</div>`;
+      + `<div style="color:#777; word-break:break-all; font-size:11px;">${f.cimNamespace}</div>`
+      + (f.extraNamespaces.length
+          ? `<div style="color:#777; word-break:break-all; font-size:11px;">`
+            + `+ ${f.extraNamespaces.length} extension namespace`
+            + `${f.extraNamespaces.length > 1 ? 's' : ''}: ${f.extraNamespaces.join(' ')}</div>`
+          : '');
     box.appendChild(card);
   }
 
@@ -1756,6 +1839,14 @@ function buildGraph(m) {
                 label: `End ${pte.endNumber}: ${pte.name}` };
     nodes.push(n); nodeById.set(n.key, n);
   }
+  // Containers and other non-conducting classes. Their own kind, so they never leak
+  // into the equipment count, the map, or the missing-Location check. Visibility is
+  // driven by the Classes setting (container = recommended, other = all).
+  for (const c of (m.context ? m.context.values() : [])) {
+    const n = { key: kindKey('context', c.id), kind: 'context', obj: c,
+                type: c.type, tier: c.tier || 'other', label: c.name };
+    nodes.push(n); nodeById.set(n.key, n);
+  }
 
   const edges = [];
   for (const t of m.terminals.values()) {
@@ -1775,6 +1866,41 @@ function buildGraph(m) {
     }
     if (pte.terminalId && nodeById.has(kindKey('terminal', pte.terminalId))) {
       edges.push({ source: pKey, target: kindKey('terminal', pte.terminalId), kind: 'pe' });
+    }
+  }
+  // Every edge above follows a reference that points AT a component: a Terminal names
+  // its ConductingEquipment (which is why EnergySource and Breaker connect), and a
+  // PowerTransformerEnd names its transformer. Plenty of classes hold the association
+  // the other way round and name their counterpart themselves — LvFeeder.Terminal,
+  // LvFeeder.Feeder, Feeder.Substation, Feeder.NormalHeadTerminal, Circuit.EndTerminal.
+  // Nothing walked that direction, so those objects rendered as isolated islands.
+  //
+  // One generic rule covers all of them: for each equipment/context object, every
+  // rdf:resource it carries that resolves to another node becomes an edge.
+  const pairKey = (a, b) => (a < b ? a + '~' + b : b + '~' + a);   // direction-agnostic
+  const seenEdge = new Set(edges.map(e => pairKey(e.source, e.target)));
+  const nodeKeyFor = (id) => {
+    for (const kind of ['equipment', 'context', 'terminal', 'cn']) {
+      const k = kindKey(kind, id);
+      if (nodeById.has(k)) return k;
+    }
+    return null;
+  };
+  const refSources = [];
+  for (const eq of m.equipment.values()) refSources.push([kindKey('equipment', eq.id), eq]);
+  for (const c of (m.context ? m.context.values() : [])) refSources.push([kindKey('context', c.id), c]);
+  for (const [fromKey, obj] of refSources) {
+    if (!obj.xml || !nodeById.has(fromKey)) continue;
+    for (const child of Array.from(obj.xml.children)) {
+      if (!isDataNamespace(child.namespaceURI)) continue;
+      const res = child.getAttributeNS(RDF, 'resource');
+      if (!res) continue;
+      const targetKey = nodeKeyFor(res.replace(/^#/, ''));
+      if (!targetKey || targetKey === fromKey) continue;   // unresolved, or a self-loop
+      const k = pairKey(fromKey, targetKey);
+      if (seenEdge.has(k)) continue;
+      seenEdge.add(k);
+      edges.push({ source: fromKey, target: targetKey, kind: 'ref', prop: child.localName });
     }
   }
 
@@ -1806,6 +1932,12 @@ function nodeShape(n) {
   if (n.kind === 'equipment') {
     const s = styleFor(n.type);
     return { shape: 'rect', fill: s.color, w: 80, h: 22, rx: 5 };
+  }
+  if (n.kind === 'context') {
+    // Wider, flatter, muted box — reads as "grouping/reference", not a device.
+    const s = STYLE[n.type];
+    return { shape: 'rect', fill: s ? s.color : (n.tier === 'container' ? '#5c6bc0' : '#90a4ae'),
+             w: 96, h: 18, rx: 9 };
   }
   if (n.kind === 'terminal') return { shape: 'circle', fill: '#ffc107', r: 7 };
   if (n.kind === 'pte') return { shape: 'circle', fill: '#ff7043', r: 8 };
@@ -1956,7 +2088,7 @@ function renderGraph(m) {
     text.setAttribute('text-anchor', 'middle');
     const yOffset = sh.shape === 'rect' ? 4 : -(sh.r + 4);
     text.setAttribute('y', yOffset);
-    text.textContent = n.kind === 'equipment'
+    text.textContent = (n.kind === 'equipment' || n.kind === 'context')
       ? `${n.type}: ${n.label}`
       : n.label;
     text.dataset.labelKind = n.kind;
@@ -2066,6 +2198,25 @@ function renderGraph(m) {
   }
 }
 
+// Reference-data rows stay in the list under "Recommended" (so the counts are visible)
+// but are dimmed and disabled, because ticking them would do nothing until the scope is
+// widened — a checked box next to an undrawn class reads as a bug.
+function syncTypeListScope() {
+  const all = classScope() === 'all';
+  document.querySelectorAll('#type-list label[data-tier="other"]').forEach(l => {
+    l.style.opacity = all ? '' : '0.45';
+    l.title = all ? '' : 'Shown only when "All classes" is selected';
+    const cb = l.querySelector('input');
+    if (cb) cb.disabled = !all;
+  });
+}
+
+// 'recommended' = equipment + containers; 'all' also shows reference/other classes.
+function classScope() {
+  const r = document.querySelector('input[name="classscope"]:checked');
+  return r ? r.value : 'recommended';
+}
+
 function applyLayerTogglesGraph() {
   if (!graphState) return;
   const showTerm  = document.getElementById('lyr-terminals').checked;
@@ -2075,11 +2226,14 @@ function applyLayerTogglesGraph() {
   const lblCN     = document.getElementById('lbl-cn').checked;
   const showBad   = document.getElementById('val-acl3').checked;
   const showNoLoc = document.getElementById('val-no-loc').checked;
+  const showAllClasses = classScope() === 'all';
 
   for (const n of graphState.nodes) {
     let visible = true;
     if (n.kind === 'equipment') {
       visible = typeEnabled(n.type);
+    } else if (n.kind === 'context') {
+      visible = (showAllClasses || n.tier === 'container') && typeEnabled(n.type);
     } else if (n.kind === 'terminal') {
       visible = showTerm || (showBad && n.bad);
     } else if (n.kind === 'cn') {
@@ -2091,6 +2245,7 @@ function applyLayerTogglesGraph() {
     const text = n.el.querySelector('text');
     let lblOn = false;
     if (n.kind === 'equipment') lblOn = lblEquip;
+    else if (n.kind === 'context') lblOn = lblEquip;
     else if (n.kind === 'terminal') lblOn = lblTerm || (showBad && n.bad);
     else if (n.kind === 'cn') lblOn = lblCN;
     if (text) text.classList.toggle('hidden', !lblOn);
@@ -2234,6 +2389,9 @@ function searchCandidates(query) {
   for (const eq of model.equipment.values()) {
     push('equipment', eq, `${eq.type}: ${eq.name}`, `${eq.type} ${eq.name} ${eq.id}`);
   }
+  if (model.context) for (const c of model.context.values()) {
+    push('context', c, `${c.type}: ${c.name}`, `${c.type} ${c.name} ${c.id}`);
+  }
   for (const t of model.terminals.values()) {
     push('terminal', t, `Terminal ${t.name} (seq ${t.seq})`, `${t.name} ${t.id}`);
   }
@@ -2251,19 +2409,23 @@ function searchCandidates(query) {
 // target. It only exists as a node in the relationship view — so switch to that view
 // first (if needed), then centre on it once the graph has rendered. Mirrors the
 // async graphState wait in toggleWorld().
-function zoomToNoLocation(eq) {
-  if (currentView === 'rel') { zoomAndSelect('equipment', eq); return; }
+function zoomToNoLocation(eq, kind) {
+  kind = kind || 'equipment';
+  if (currentView === 'rel') { zoomAndSelect(kind, eq); return; }
   const radio = document.querySelector('input[name="viewmode"][value="rel"]');
   if (radio) radio.checked = true;
   setView('rel');
   const tryZoom = (attempts) => {
-    if (graphState) zoomAndSelect('equipment', eq);
+    if (graphState) zoomAndSelect(kind, eq);
     else if (attempts > 0) setTimeout(() => tryZoom(attempts - 1), 30);
   };
   setTimeout(() => tryZoom(12), 0);
 }
 
 function zoomAndSelect(kind, obj) {
+  // Context objects (containers, reference data) are never drawn on the map — they
+  // exist only as relationship-view nodes, so a geographic zoom has nothing to target.
+  if (kind === 'context' && currentView === 'geo') { zoomToNoLocation(obj, 'context'); return; }
   if (currentView === 'geo') {
     // Find the Leaflet layer and the lat/lng to pan to
     let layer = null, latlng = null;

@@ -14,9 +14,17 @@ Prefer to run it locally? See [Running it locally](#running-it-locally) below.
 
 - **Two views**
   - *Geographic* — components placed on an OpenStreetMap background using their real `PositionPoint` coordinates.
-  - *Relationship* — a schematic that lays every component out as a radial tree, with black dotted lines drawn along the CIM topology (`Equipment ─ Terminal ─ ConnectivityNode ─ Terminal ─ Equipment`). Nodes never overlap, so it's easy to see what's connected to what when components share a location on the map.
+  - *Relationship* — a schematic that lays every component out as a radial tree, with black dotted lines drawn along the CIM topology (`Equipment ─ Terminal ─ ConnectivityNode ─ Terminal ─ Equipment`). Nodes never overlap, so it's easy to see what's connected to what when components share a location on the map. Associations are followed in both directions, so classes that name their counterpart themselves (`LvFeeder.Terminal`, `Feeder.Substation`, `Equipment.EquipmentContainer`) are connected too, not stranded.
 - **Click any component** to see every attribute from the source XML in a table — one click copies a value to the clipboard.
-- **Dynamic layers** — every equipment type found in the file gets its own checkbox with a count.
+- **Dynamic layers** — every class found in the file gets its own checkbox with a count.
+- **Class scope** — the relationship view shows *Recommended* classes by default (conducting
+  equipment plus containers such as `Feeder`, `LvFeeder`, `Substation`, `VoltageLevel`), or
+  switch to *All classes* to include reference data (`BaseVoltage`, `WireInfo`, `UsagePoint`,
+  alias and address records). Containers are drawn as dashed boxes so they read as grouping
+  rather than as devices.
+- **Vendor extension namespaces** — objects outside the main CIM namespace (e.g. Zepben EWB's
+  `zb:LvFeeder`) are parsed and shown, with the extra namespaces listed in the Format panel.
+  Only RDF and model-description metadata are ignored.
 - **Validation** checkboxes with an issues panel: highlights AcLineSegments with ≠2 terminals (pulsing red so they're impossible to miss), Terminals missing a ConnectivityNode, and Equipment missing a Location.
 - **Search** by component name or mRID; pressing Enter zooms and selects in either view.
 - **Resizable sidebar**, drag-to-pin nodes in the schematic, and zoom/pan on both views.
